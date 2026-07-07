@@ -2,7 +2,7 @@
 #
 # Zrcadli zdroje na cile (robocopy /MIR). ZADNE zadratovane nastaveni - vse se
 # cte z configu (%USERPROFILE%\.config\claude-backup\config.json), ktery odpovida
-# config.schema.json. Chovani je 1:1 s legacy\claude-backup.ps1 (viz PRD, faze 1).
+# config.schema.json. Chovani je 1:1 s puvodni zadratovanou verzi (viz PRD, faze 1).
 #
 # Spousteno naplanovanou ulohou ClaudeBackup (po prihlaseni + kazdych 10 min)
 # pres claude-backup-hidden.vbs (skryte okno), ktery propaguje navratovy kod.

@@ -4,7 +4,6 @@ Automatické zálohování `~/.claude*` profilů a pracovních složek na OneDri
 a externí SSD — řízené config souborem místo editace scriptu.
 
 - **Zadání a návrh:** [PRD.md](PRD.md)
-- **Původní (zadrátovaná) verze scriptů:** [legacy/](legacy/)
 
 ## Komponenty
 
@@ -118,7 +117,7 @@ odpojeném disku **nezálohuje nikam** — má kopii jen na tom jednom cíli.
 ```
 deploy.ps1            # nasadí engine + editor + wrapper do ~/.local/bin, přepne úlohu
 deploy.ps1 -WhatIf    # jen ukáže, co by udělal (nic nemění)
-deploy.ps1 -Rollback  # obnoví předchozí (legacy) engine ze zálohy .bak
+deploy.ps1 -Rollback  # obnoví předchozí engine ze zálohy .bak
 ```
 
 Přepnutí úlohy na nový engine = nahrazení `~/.local/bin/claude-backup.ps1` (VBS
@@ -130,7 +129,7 @@ Záloha je **zrcadlo posledního stavu** (`robocopy /MIR`), ne historie verzí.
 Data najdeš přímo v cíli:
 
 - **OneDrive:** `%OneDrive%\Backups\claude\` (je tu i log `_backup.log`)
-- **externí SSD:** `KINGSTON:\Backups\claude\` (písmeno disku se mění — hledá se podle jmenovky svazku)
+- **externí SSD:** `<disk>:\Backups\claude\` (písmeno se mění — hledá se podle jmenovky svazku; výchozí placeholder `BACKUP_SSD`)
 
 Obnova = zkopírovat složky zpět (např. `…\Backups\claude\.claude` zpět do
 `%USERPROFILE%`). Struktura pod `Backups\claude` odpovídá cestám v profilu.

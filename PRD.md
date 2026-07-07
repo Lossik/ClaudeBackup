@@ -2,7 +2,7 @@
 
 **Stav:** ✅ hotovo — fáze 1–4 implementovány, ověřeny a **nasazeny** (naplánovaná úloha běží na novém config-driven enginu). Navíc: Windows notifikace při selhání, editace intervalu úlohy.
 **Datum:** 2026-07-07
-**Repo:** github.com/Lossik/ClaudeBackup (private)
+**Repo:** github.com/Lossik/ClaudeBackup
 
 ## 1. Motivace
 
@@ -23,9 +23,9 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
 - Výjimky: `.credentials.json` (tokeny — nikdy nezálohovat).
 - Cíle:
   - OneDrive `Backups\claude` (primární, obsahuje i `_backup.log`),
-  - externí SSD podle jmenovky svazku `KINGSTON` (volitelný, s `/FFT` kvůli exFAT).
+  - externí SSD podle jmenovky svazku (volitelný, s `/FFT` kvůli exFAT).
 - Návratové kódy: 0 ok / 1 chyba kopírování / 2 žádný cíl nedostupný.
-- Kopie původních scriptů jsou v `legacy/` jako reference.
+- Původní zadrátované scripty jsou v git historii (dříve `legacy/`).
 
 ## 3. Cíle
 
@@ -106,7 +106,7 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
     {
       "name": "extSSD",
       "type": "volumeLabel",
-      "label": "KINGSTON",
+      "label": "BACKUP_SSD",
       "subPath": "Backups\\claude",
       "robocopyOpts": ["/FFT"],
       "optional": true
@@ -172,7 +172,7 @@ ClaudeBackup — konfigurace
 ──────────────────────────
 Zdroje:                        Cíle:
   1. ~\.claude*  (glob)          A. OneDrive  ~\OneDrive\Backups\claude  [primární]
-  2. ~\.local\bin                B. extSSD    KINGSTON:\Backups\claude   [volitelný]
+  2. ~\.local\bin                B. extSSD    BACKUP_SSD:\Backups\claude [volitelný]
   3. ~\Claude
 Výjimky: soubory: .credentials.json  |  složky: node_modules, tmp, …
 
@@ -206,7 +206,7 @@ node) do `~/.local/bin`, nasadí schéma vedle configu, srovná interval úlohy 
 
 | Fáze | Obsah | Výstup | Stav |
 |------|-------|--------|------|
-| 1 | Config schéma + engine čte config (chování 1:1 s dneškem) | `config.schema.json`, nový `claude-backup.ps1`, výchozí `config.json` | ✅ implementováno, ověřeno v sandboxu i naostro (OneDrive + KINGSTON) |
+| 1 | Config schéma + engine čte config (chování 1:1 s dneškem) | `config.schema.json`, nový `claude-backup.ps1`, výchozí `config.json` | ✅ implementováno, ověřeno v sandboxu i naostro (OneDrive + externí SSD) |
 | 2 | Node.js CLI editor (menu, průvodci, validace, atomický zápis) | `claude-backup-cfg.js` | ✅ implementováno, ověřeno (27 testů); UI ASCII, bez závislostí |
 | 3 | Dry-run + stav poslední zálohy v editoru | rozšíření CLI (`[t]`/`[s]`) | ✅ implementováno, ověřeno (36 testů) + reálný smoke |
 | 4 | Nasazení: deploy script do `~/.local/bin`, ověření úlohy | `deploy.ps1` | ✅ nasazeno naostro; úloha běží na novém enginu (LastTaskResult 0, `.config\claude-backup` v logu). Legacy záloha + `-Rollback`, `-WhatIf` náhled |

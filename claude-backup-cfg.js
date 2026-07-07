@@ -273,7 +273,8 @@ function render(cfg, dirty) {
     console.log('Notifikace pri chybe: ' + (notifyEnabled(cfg) ? 'ZAP (Windows toast)' : 'vyp'));
     console.log('Interval ulohy: ' + (scheduleInterval(cfg) !== null ? scheduleInterval(cfg) + ' min' : '(nenastaveno)') + '   (uloha ' + scheduleTaskName(cfg) + ')');
     console.log('------------------------------------------------------------');
-    console.log('[p] pridat zdroj   [o] odebrat zdroj   [c] pridat cil   [x] odebrat cil');
+    console.log('[p] pridat zdroj   [o] odebrat zdroj   [ec] upravit zdroj');
+    console.log('[c] pridat cil     [x] odebrat cil     [ep] upravit cil');
     console.log('[f] vyjimky-soubory   [d] vyjimky-slozky   [n] notifikace zap/vyp');
     console.log('[i] interval ulohy   [t] test (dry-run)   [s] stav   [u] ulozit   [q] konec');
 }
@@ -379,6 +380,101 @@ async function editExcludes(cfg, kind) {
     }
 }
 
+// Upravit existujici cil (nazev, primarni, volitelny, cesta, robocopyOpts).
+async function editDestination(cfg) {
+    if (!cfg.destinations || !cfg.destinations.length) { console.log('  zadne cile.'); return false; }
+    const a = (await ask('pismeno cile k uprave (prazdne=zpet): ')).trim().toUpperCase();
+    if (!a) return false;
+    const idx = a.charCodeAt(0) - 65;
+    if (idx < 0 || idx >= cfg.destinations.length) { console.log('  neplatne pismeno.'); return false; }
+    const d = cfg.destinations[idx];
+    let changed = false;
+    for (;;) {
+        console.log('\n  cil ' + letter(idx) + ': ' + destLabel(d));
+        console.log('  [m] nazev   [p] primarni   [o] volitelny   [c] cesta   [r] robocopyOpts   [z] zpet');
+        const c = (await ask('  co upravit? ')).trim().toLowerCase();
+        if (!c || c === 'z') return changed;
+        if (c === 'm') {
+            const nn = (await ask('    novy nazev (prazdne=nechat): ')).trim();
+            if (nn && nn !== d.name) {
+                if (cfg.destinations.some((x, i) => i !== idx && x.name === nn)) { console.log('    jmeno uz existuje.'); }
+                else {
+                    const old = d.name; d.name = nn; changed = true;
+                    (cfg.sources || []).forEach(s => { if (Array.isArray(s.onlyDestinations)) s.onlyDestinations = s.onlyDestinations.map(x => x === old ? nn : x); });
+                    console.log('    nazev zmenen na ' + nn + ' (opraveno i v onlyDestinations).');
+                }
+            }
+        } else if (c === 'p') {
+            if (d.primary === true) { console.log('    uz je primarni.'); }
+            else {
+                cfg.destinations.forEach(x => { x.primary = false; });
+                d.primary = true; changed = true;
+                console.log('    nastaven jako primarni (u ostatnich zruseno).');
+                if (d.optional) console.log('    pozn.: cil je volitelny - primarni by mel byt vzdy dostupny (jinak log padne do slozky configu).');
+            }
+        } else if (c === 'o') {
+            d.optional = !(d.optional === true); changed = true;
+            console.log('    volitelny: ' + (d.optional ? 'ANO' : 'ne'));
+            if (d.optional && d.primary) console.log('    pozn.: primarni cil delas volitelnym.');
+        } else if (c === 'c') {
+            if (d.type === 'path') {
+                const np = (await ask('    nova cesta (lze %VAR%, prazdne=nechat): ')).trim();
+                if (np) { d.path = np; changed = true; console.log('    cesta zmenena.'); }
+            } else if (d.type === 'volumeLabel') {
+                const nl = (await ask('    nova jmenovka svazku (prazdne=nechat "' + d.label + '"): ')).trim();
+                if (nl) { d.label = nl; changed = true; }
+                const ns = (await ask('    nova podcesta (prazdne=nechat "' + d.subPath + '"): ')).trim();
+                if (ns) { d.subPath = ns; changed = true; }
+                if (nl || ns) console.log('    cesta zmenena.');
+            }
+        } else if (c === 'r') {
+            const nr = (await ask('    robocopy prepinace (carkou; "-" = zadne; prazdne=nechat): ')).trim();
+            if (nr === '-') { d.robocopyOpts = []; changed = true; console.log('    prepinace vymazany.'); }
+            else if (nr) { d.robocopyOpts = csvToArr(nr); changed = true; console.log('    prepinace nastaveny.'); }
+        } else console.log('    neznamy prikaz.');
+    }
+}
+
+// Upravit existujici zdroj (dle typu: glob base/pattern, dir cesta; onlyDestinations).
+async function editSource(cfg) {
+    if (!cfg.sources || !cfg.sources.length) { console.log('  zadne zdroje.'); return false; }
+    const a = (await ask('cislo zdroje k uprave (prazdne=zpet): ')).trim();
+    if (!a) return false;
+    const idx = parseInt(a, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= cfg.sources.length) { console.log('  neplatne cislo.'); return false; }
+    const s = cfg.sources[idx];
+    let changed = false;
+    for (;;) {
+        const only = (Array.isArray(s.onlyDestinations) && s.onlyDestinations.length) ? s.onlyDestinations.join(', ') : '(vsechny cile)';
+        console.log('\n  zdroj ' + (idx + 1) + ': ' + srcLabel(s));
+        console.log('  omezeni na cile: ' + only);
+        if (s.type === 'glob') console.log('  [b] base   [p] pattern   [l] omezeni-cile   [z] zpet');
+        else console.log('  [c] cesta   [l] omezeni-cile   [z] zpet');
+        const c = (await ask('  co upravit? ')).trim().toLowerCase();
+        if (!c || c === 'z') return changed;
+        if (s.type === 'glob' && c === 'b') {
+            const nb = (await ask('    nova base (prazdne=nechat): ')).trim();
+            if (nb) { s.base = nb; changed = true; console.log('    base zmenena.'); }
+        } else if (s.type === 'glob' && c === 'p') {
+            const np = (await ask('    novy pattern (prazdne=nechat): ')).trim();
+            if (np) { s.pattern = np; changed = true; console.log('    pattern zmenen.'); }
+        } else if (s.type === 'dir' && c === 'c') {
+            const np = (await ask('    nova cesta (lze %VAR%, prazdne=nechat): ')).trim();
+            if (np) { const exp = expandEnv(np); if (!fs.existsSync(exp)) console.log('    pozn.: cesta ted neexistuje (' + exp + ').'); s.path = np; changed = true; console.log('    cesta zmenena.'); }
+        } else if (c === 'l') {
+            const names = (cfg.destinations || []).map(x => x.name);
+            const nv = (await ask('    cile carkou ("-" = na vsechny; prazdne=nechat) [' + names.join(', ') + ']: ')).trim();
+            if (nv === '-') { delete s.onlyDestinations; changed = true; console.log('    -> na vsechny cile'); }
+            else if (nv) {
+                const arr = csvToArr(nv);
+                const bad = arr.filter(x => !names.includes(x));
+                if (bad.length) console.log('    neexistujici cile: ' + bad.join(', '));
+                else { s.onlyDestinations = arr; changed = true; console.log('    -> jen: ' + arr.join(', ')); }
+            }
+        } else console.log('    neznamy prikaz.');
+    }
+}
+
 // --- test (dry-run) a stav (faze 3) ----------------------------------------
 async function testDryRun(cfg) {
     const errs = validateConfig(cfg);
@@ -469,6 +565,8 @@ async function main() {
             else if (cmd === 'o') { if (await removeSource(cfg)) dirty = true; }
             else if (cmd === 'c') { if (await addDestination(cfg)) dirty = true; }
             else if (cmd === 'x') { if (await removeDestination(cfg)) dirty = true; }
+            else if (cmd === 'ep') { if (await editDestination(cfg)) dirty = true; }
+            else if (cmd === 'ec') { if (await editSource(cfg)) dirty = true; }
             else if (cmd === 'f') { if (await editExcludes(cfg, 'files')) dirty = true; }
             else if (cmd === 'd') { if (await editExcludes(cfg, 'dirs')) dirty = true; }
             else if (cmd === 't') { await testDryRun(cfg); }

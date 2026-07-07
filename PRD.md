@@ -214,10 +214,13 @@ s exit 3 — nasazení tedy proběhne v pořadí: (1) vygenerovat config,
   smazat obsah cíle. Mitigace: validace (schéma i engine) odmítne prázdné
   `sources`/`destinations` → exit 3 před robocopy. **Implementováno a ověřeno**
   v sandboxu (kritérium 4).
-- **Délka cílové cesty (MAX_PATH)**: podsložka v cíli se odvozuje relativně
-  k profilu, takže hluboko zanořený `dir` zdroj může cílovou cestu přetáhnout
-  přes 260 znaků. Produkční zdroje jsou mělké (`.local\bin`, `Claude`,
-  `.config\claude-backup`) → dnes bez dopadu; hlídat při přidávání zdrojů.
+- **~~Délka cílové cesty (MAX_PATH)~~** — ✅ vyřešeno: `robocopy /MIR` je
+  long-path-aware, mirror zvládá cílové cesty i výrazně přes 260 znaků
+  (ověřeno: 266 i 512 znaků → exit 0, soubor reálně zkopírován). Engine nemá
+  žádnou jinou operaci citlivou na délku — cílový kořen i kopie kořenových
+  souborů jsou krátké. Praktický strop je limit robocopy (~32 000 znaků).
+  Pozn.: nástroje s `Get-ChildItem -Recurse` na cesty >260 nedosáhnou, ale to
+  je limit toho nástroje, ne zálohy.
 - **Souběh editoru a běžící zálohy**: úloha běží každých 10 min; atomický
   zápis configu stačí (engine čte config jednou na začátku).
 - **Otevřená otázka:** má editor umět měnit i interval úlohy v Plánovači?

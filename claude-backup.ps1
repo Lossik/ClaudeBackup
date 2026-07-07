@@ -170,6 +170,8 @@ function Resolve-DestRoot($d) {
 function Get-DestSubPath($absPath) {
     # Podslozka v cili. Kdyz je zdroj pod profilem, zachovej relativni cestu
     # (.local\bin -> <cil>\.local\bin, shodne s legacy), jinak jen jmeno slozky.
+    # Pozn.: dlouha vysledna cesta (>260, MAX_PATH) neni problem - mirror dela
+    # robocopy, ktery je long-path-aware (overeno na 266 i 512 znacich).
     $prof = $env:USERPROFILE
     if ($absPath.StartsWith($prof, [StringComparison]::OrdinalIgnoreCase)) {
         $rel = $absPath.Substring($prof.Length).TrimStart('\', '/')

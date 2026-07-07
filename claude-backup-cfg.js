@@ -56,7 +56,8 @@ function defaultConfig() {
             { name: 'extSSD', type: 'volumeLabel', label: 'KINGSTON', subPath: 'Backups\\claude', robocopyOpts: ['/FFT'], optional: true }
         ],
         log: { file: '_backup.log', maxSizeKB: 1024, keepLines: 300 },
-        notify: { onError: true }
+        notify: { onError: true },
+        schedule: { taskName: 'ClaudeBackup', intervalMinutes: 10 }
     };
 }
 
@@ -121,6 +122,14 @@ function validateConfig(cfg) {
     if (cfg.notify !== undefined) {
         if (typeof cfg.notify !== 'object' || Array.isArray(cfg.notify)) e.push("notify: musi byt objekt");
         else if (cfg.notify.onError !== undefined && typeof cfg.notify.onError !== 'boolean') e.push("notify.onError: musi byt boolean");
+    }
+
+    if (cfg.schedule !== undefined) {
+        if (typeof cfg.schedule !== 'object' || Array.isArray(cfg.schedule)) e.push("schedule: musi byt objekt");
+        else {
+            if (cfg.schedule.taskName !== undefined && (typeof cfg.schedule.taskName !== 'string' || !cfg.schedule.taskName)) e.push("schedule.taskName: musi byt neprazdny retezec");
+            if (cfg.schedule.intervalMinutes !== undefined && (!Number.isInteger(cfg.schedule.intervalMinutes) || cfg.schedule.intervalMinutes < 1)) e.push("schedule.intervalMinutes: musi byt cele cislo >= 1");
+        }
     }
 
     const dts = Array.isArray(cfg.destinations) ? cfg.destinations : [];
@@ -204,6 +213,30 @@ function csvToArr(s) { return String(s).split(',').map(x => x.trim()).filter(Boo
 // --- render ----------------------------------------------------------------
 function letter(i) { return String.fromCharCode(65 + i); }
 function notifyEnabled(cfg) { return !(cfg.notify && cfg.notify.onError === false); }
+function scheduleTaskName(cfg) { return (cfg.schedule && cfg.schedule.taskName) ? cfg.schedule.taskName : 'ClaudeBackup'; }
+function scheduleInterval(cfg) { return (cfg.schedule && cfg.schedule.intervalMinutes) ? cfg.schedule.intervalMinutes : null; }
+
+// Precte interval opakovani (v minutach) ze zive naplanovane ulohy, nebo null.
+function getTaskIntervalMinutes(taskName) {
+    if (/'/.test(taskName)) return null;
+    const r = spawnSync(POWERSHELL, ['-NoProfile', '-Command',
+        "$ErrorActionPreference='SilentlyContinue'; $t = Get-ScheduledTask -TaskName '" + taskName + "'; if ($t) { $iv = $t.Triggers | ForEach-Object { $_.Repetition.Interval } | Where-Object { $_ } | Select-Object -First 1; if ($iv) { [int][System.Xml.XmlConvert]::ToTimeSpan($iv).TotalMinutes } }"],
+        { encoding: 'utf8' });
+    const n = parseInt(((r && r.stdout) || '').trim(), 10);
+    return Number.isInteger(n) ? n : null;
+}
+
+// Nastavi interval opakovani zive ulohy (zachova oba triggery). Vraci {ok, msg}.
+function setTaskIntervalMinutes(taskName, minutes) {
+    if (/'/.test(taskName)) return { ok: false, msg: 'nazev ulohy obsahuje apostrof' };
+    const r = spawnSync(POWERSHELL, ['-NoProfile', '-Command',
+        "$ErrorActionPreference='Stop'; $name='" + taskName + "'; try { $t = Get-ScheduledTask -TaskName $name; $ok=$false; foreach ($tr in $t.Triggers) { if ($tr.Repetition -and $tr.Repetition.Interval) { $tr.Repetition.Interval='PT" + minutes + "M'; $ok=$true } }; if (-not $ok) { throw 'uloha nema opakovaci trigger' }; Set-ScheduledTask -TaskName $name -Trigger $t.Triggers | Out-Null; 'OK' } catch { 'ERR: '+$_.Exception.Message }"],
+        { encoding: 'utf8' });
+    if (r.error) return { ok: false, msg: r.error.message };
+    const out = ((r && r.stdout) || '').trim();
+    if (out.endsWith('OK')) return { ok: true };
+    return { ok: false, msg: out.replace(/^ERR:\s*/, '') || 'neznama chyba' };
+}
 
 function srcLabel(s) {
     if (s.type === 'glob') return `glob   base=${s.base}  pattern=${s.pattern}`;
@@ -238,10 +271,11 @@ function render(cfg, dirty) {
     console.log('  soubory: ' + (cfg.excludeFiles || []).join(', '));
     console.log('  slozky:  ' + ((cfg.excludeDirs && cfg.excludeDirs.length) ? cfg.excludeDirs.join(', ') : '(zadne)'));
     console.log('Notifikace pri chybe: ' + (notifyEnabled(cfg) ? 'ZAP (Windows toast)' : 'vyp'));
+    console.log('Interval ulohy: ' + (scheduleInterval(cfg) !== null ? scheduleInterval(cfg) + ' min' : '(nenastaveno)') + '   (uloha ' + scheduleTaskName(cfg) + ')');
     console.log('------------------------------------------------------------');
     console.log('[p] pridat zdroj   [o] odebrat zdroj   [c] pridat cil   [x] odebrat cil');
     console.log('[f] vyjimky-soubory   [d] vyjimky-slozky   [n] notifikace zap/vyp');
-    console.log('[t] test (dry-run)   [s] stav   [u] ulozit   [q] konec');
+    console.log('[i] interval ulohy   [t] test (dry-run)   [s] stav   [u] ulozit   [q] konec');
 }
 
 // --- pruvodci --------------------------------------------------------------
@@ -439,6 +473,33 @@ async function main() {
             else if (cmd === 'd') { if (await editExcludes(cfg, 'dirs')) dirty = true; }
             else if (cmd === 't') { await testDryRun(cfg); }
             else if (cmd === 's') { await showStatus(cfg); }
+            else if (cmd === 'i') {
+                const name = scheduleTaskName(cfg);
+                const cur = scheduleInterval(cfg);
+                const live = getTaskIntervalMinutes(name);
+                console.log('\n  uloha: ' + name);
+                console.log('  interval v configu:  ' + (cur !== null ? cur + ' min' : '(nenastaveno)'));
+                console.log('  interval zive ulohy: ' + (live !== null ? live + ' min' : '(uloha nenalezena / bez repetice)'));
+                const a = (await ask('  novy interval v minutach (prazdne = zpet): ')).trim();
+                if (a) {
+                    const m = parseInt(a, 10);
+                    if (!Number.isInteger(m) || m < 1 || String(m) !== a) {
+                        console.log('  neplatne cislo (cekam cele cislo >= 1).');
+                    } else {
+                        if (!cfg.schedule) cfg.schedule = {};
+                        cfg.schedule.taskName = name;
+                        cfg.schedule.intervalMinutes = m;
+                        dirty = true;
+                        console.log('  + interval v configu nastaven na ' + m + ' min (uloz [u]).');
+                        const ap = await askYesNo('  aplikovat hned na zivou ulohu ' + name + '?', true);
+                        if (ap) {
+                            const res = setTaskIntervalMinutes(name, m);
+                            if (res.ok) console.log('  ZIVA ULOHA zmenena na ' + m + ' min.');
+                            else console.log('  aplikace selhala: ' + res.msg + '\n  (interval zustava v configu; aplikuje se pri deploy / muze vyzadovat admina).');
+                        }
+                    }
+                }
+            }
             else if (cmd === 'n') {
                 if (!cfg.notify) cfg.notify = {};
                 cfg.notify.onError = !notifyEnabled(cfg);

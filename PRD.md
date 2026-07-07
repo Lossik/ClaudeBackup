@@ -43,7 +43,9 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
 - Verzování / retence záloh (robocopy `/MIR` zůstává — poslední stav, ne historie).
 - Šifrování, komprese, cloud API (S3 apod.).
 - GUI aplikace / web UI — začínáme CLI, GUI případně později.
-- Správa samotné naplánované úlohy (interval, trigger) — úloha zůstává, jak je.
+- Plná správa naplánované úlohy (vytvoření, přidávání/odebírání triggerů) —
+  mimo **interval opakování**, který editor nově umí měnit (viz § 8). Struktura
+  triggerů (logon + repetice) i akce zůstávají.
 
 ## 5. Návrh řešení
 
@@ -111,7 +113,8 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
     }
   ],
   "log": { "file": "_backup.log", "maxSizeKB": 1024, "keepLines": 300 },
-  "notify": { "onError": true }
+  "notify": { "onError": true },
+  "schedule": { "taskName": "ClaudeBackup", "intervalMinutes": 10 }
 }
 ```
 
@@ -138,6 +141,9 @@ Klíčové vlastnosti:
   Nezadáno = na všechny cíle.
 - **`notify`** (volitelné) — `onError` zapíná Windows toast při selhání zálohy
   (exit 1/2/3). Když blok chybí, notifikace jsou zapnuté (ekvivalent `true`).
+- **`schedule`** (volitelné) — `intervalMinutes` = interval opakování zálohy,
+  `taskName` = jméno úlohy. Editor (`[i]`) ho mění a umí ho aplikovat rovnou na
+  živou úlohu. Engine `schedule` ignoruje (je to stav plánovače, ne obsah zálohy).
 - **`version`** — pro budoucí migrace schématu.
 
 ### 5.4 Validace a chování při chybě
@@ -223,8 +229,11 @@ s exit 3 — nasazení tedy proběhne v pořadí: (1) vygenerovat config,
   je limit toho nástroje, ne zálohy.
 - **Souběh editoru a běžící zálohy**: úloha běží každých 10 min; atomický
   zápis configu stačí (engine čte config jednou na začátku).
-- **Otevřená otázka:** má editor umět měnit i interval úlohy v Plánovači?
-  (Zatím ne-cíl, ale schéma na to nechává prostor.)
+- **~~Otevřená otázka:~~ editor mění interval úlohy** — ✅ vyřešeno:
+  `schedule.intervalMinutes` v configu; editor (`[i]`) interval mění a umí ho
+  aplikovat rovnou na živou úlohu přes `Set-ScheduledTask` (ověřeno bez admina —
+  úloha má RunLevel Limited). Mění se jen repetice time triggeru; logon trigger
+  i akce zůstávají. Ostatní správa úlohy dál ne-cíl (§ 4).
 - **~~Otevřená otázka:~~ notifikace při selhání zálohy (toast)** — ✅ vyřešeno:
   engine při exit 1/2/3 zobrazí Windows toast (`NotifyIcon`, bez závislostí,
   best-effort). Řízeno `notify.onError` (default zap i bez bloku), potlačeno

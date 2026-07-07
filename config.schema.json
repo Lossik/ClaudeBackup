@@ -137,6 +137,15 @@
       "properties": {
         "onError": { "type": "boolean", "description": "Oznamit selhani zalohy (exit 1/2/3) toastem. Vychozi true." }
       }
+    },
+    "schedule": {
+      "type": "object",
+      "description": "Naplanovana uloha (Task Scheduler). Volitelne. Interval opakovani meni editor primo v uloze; struktura triggeru (logon + repetice) zustava. Engine schedule ignoruje.",
+      "additionalProperties": false,
+      "properties": {
+        "taskName": { "type": "string", "minLength": 1, "description": "Nazev naplanovane ulohy. Vychozi 'ClaudeBackup'." },
+        "intervalMinutes": { "type": "integer", "minimum": 1, "description": "Interval opakovani zalohy v minutach (repetice time triggeru)." }
+      }
     }
   }
 }

@@ -14,12 +14,13 @@
 //
 // Argumenty:  --config <cesta>   (jinak vychozi cesta v profilu)
 //
-// Vyjimky souboru/slozek a test/stav (dry-run) prijdou ve fazi 3.
+// [t] test (dry-run, robocopy /L) a [s] stav posledni zalohy (faze 3).
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
+const { spawnSync } = require('child_process');
 
 // --- cesty -----------------------------------------------------------------
 function parseConfigPath() {
@@ -30,6 +31,11 @@ function parseConfigPath() {
 const CONFIG_PATH = parseConfigPath();
 const CONFIG_DIR = path.dirname(CONFIG_PATH);
 const SCHEMA_HINT = './config.schema.json';
+// engine je vedle editoru (dev: koren repa; nasazeno: ~/.local/bin)
+const ENGINE = path.join(__dirname, 'claude-backup.ps1');
+const POWERSHELL = process.env.SystemRoot
+    ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    : 'powershell.exe';
 
 // --- vychozi config (1:1 s legacy + faze 1) --------------------------------
 function defaultConfig() {
@@ -56,6 +62,35 @@ function defaultConfig() {
 // --- env expanze (jen pro kontrolu existence / zobrazeni) ------------------
 function expandEnv(s) {
     return String(s).replace(/%([^%]+)%/g, (m, n) => (process.env[n] !== undefined ? process.env[n] : m));
+}
+
+// Rozvine cestu cile shodne s enginem (Resolve-EnvPath): %VAR% -> fallbacky -> %USERPROFILE%\<VAR>.
+function resolveEnvPath(p, fallbacks) {
+    let r = expandEnv(p);
+    const m = r.match(/%([^%]+)%/);
+    if (m) {
+        const varName = m[1];
+        let val = null;
+        for (const fb of (Array.isArray(fallbacks) ? fallbacks : [])) { if (process.env[fb]) { val = process.env[fb]; break; } }
+        if (!val) val = path.join(os.homedir(), varName);
+        r = expandEnv(String(p).replace('%' + varName + '%', val));
+    }
+    return r;
+}
+
+// Absolutni cesta k cilove slozce, nebo null kdyz nedostupny (jako engine Resolve-DestRoot).
+function resolveDestRoot(d) {
+    if (!d) return null;
+    if (d.type === 'path') return resolveEnvPath(d.path, d.envFallback);
+    if (d.type === 'volumeLabel') {
+        if (!/^[A-Za-z0-9 _.\-]+$/.test(String(d.label || ''))) return null;
+        const r = spawnSync(POWERSHELL, ['-NoProfile', '-Command',
+            "(Get-Volume -FileSystemLabel '" + d.label + "' -ErrorAction SilentlyContinue).DriveLetter"], { encoding: 'utf8' });
+        const letter = ((r && r.stdout) || '').trim();
+        if (!letter) return null;
+        return letter + ':\\' + d.subPath;
+    }
+    return null;
 }
 
 // --- validace (zrcadli config.schema.json + engine) ------------------------
@@ -197,7 +232,8 @@ function render(cfg, dirty) {
     console.log('  slozky:  ' + ((cfg.excludeDirs && cfg.excludeDirs.length) ? cfg.excludeDirs.join(', ') : '(zadne)'));
     console.log('------------------------------------------------------------');
     console.log('[p] pridat zdroj   [o] odebrat zdroj   [c] pridat cil   [x] odebrat cil');
-    console.log('[f] vyjimky-soubory   [d] vyjimky-slozky   [u] ulozit   [q] konec');
+    console.log('[f] vyjimky-soubory   [d] vyjimky-slozky');
+    console.log('[t] test (dry-run)   [s] stav   [u] ulozit   [q] konec');
 }
 
 // --- pruvodci --------------------------------------------------------------
@@ -301,6 +337,62 @@ async function editExcludes(cfg, kind) {
     }
 }
 
+// --- test (dry-run) a stav (faze 3) ----------------------------------------
+async function testDryRun(cfg) {
+    const errs = validateConfig(cfg);
+    if (errs.length) {
+        console.log('\nNELZE TESTOVAT - config neni platny:');
+        errs.forEach(x => console.log('  * ' + x));
+        return;
+    }
+    if (!fs.existsSync(ENGINE)) { console.log('\nEngine nenalezen: ' + ENGINE); return; }
+    // testujeme AKTUALNI stav editoru (i neulozeny) -> zapis do docasneho configu
+    const tmp = path.join(os.tmpdir(), 'cbcfg-dryrun-' + process.pid + '.json');
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+    console.log('\n----- DRY-RUN (robocopy /L; aktualni stav editoru, nic se nezapisuje) -----');
+    const r = spawnSync(POWERSHELL, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ENGINE, '-DryRun', '-ConfigPath', tmp],
+        { stdio: ['ignore', 'inherit', 'inherit'] });
+    try { fs.rmSync(tmp, { force: true }); } catch (e) { /* ignore */ }
+    console.log('----- konec dry-run -----');
+    if (r.error) { console.log('  chyba spusteni enginu: ' + r.error.message); return; }
+    const meaning = { 0: 'ok', 1: 'chyba kopirovani', 2: 'zadny cil dostupny', 3: 'config neplatny' }[r.status] || '?';
+    console.log('  navratovy kod enginu: ' + r.status + ' (' + meaning + ')');
+}
+
+async function showStatus(cfg) {
+    const rc = { 0: 'ok', 1: 'chyba kopirovani', 2: 'zadny cil dostupny', 3: 'config neplatny' };
+    // 1) posledni radky _backup.log v primarnim cili
+    const primary = (cfg.destinations || []).find(d => d && d.primary === true);
+    const logFile = (cfg.log && cfg.log.file) ? cfg.log.file : '_backup.log';
+    console.log('\n----- STAV: posledni radky ' + logFile + ' -----');
+    if (!primary) {
+        console.log('  neni primarni cil.');
+    } else {
+        const root = resolveDestRoot(primary);
+        if (!root) {
+            console.log('  primarni cil (' + primary.name + ') neni dostupny.');
+        } else {
+            const lp = path.join(root, logFile);
+            if (!fs.existsSync(lp)) console.log('  log zatim neexistuje: ' + lp);
+            else fs.readFileSync(lp, 'utf8').split(/\r?\n/).filter(Boolean).slice(-25).forEach(l => console.log('  ' + l));
+        }
+    }
+    // 2) LastTaskResult naplanovane ulohy
+    console.log('----- STAV: naplanovana uloha ClaudeBackup -----');
+    const r = spawnSync(POWERSHELL, ['-NoProfile', '-Command',
+        "$ErrorActionPreference='SilentlyContinue'; $i = Get-ScheduledTaskInfo -TaskName 'ClaudeBackup'; if ($i) { [pscustomobject]@{ LastRunTime = (''+$i.LastRunTime); LastTaskResult = $i.LastTaskResult; NextRunTime = (''+$i.NextRunTime) } | ConvertTo-Json -Compress }"],
+        { encoding: 'utf8' });
+    const out = ((r && r.stdout) || '').trim();
+    if (!out) { console.log('  uloha nenalezena nebo bez informaci.'); return; }
+    try {
+        const info = JSON.parse(out);
+        const m = rc[info.LastTaskResult];
+        console.log('  LastRunTime:    ' + info.LastRunTime);
+        console.log('  LastTaskResult: ' + info.LastTaskResult + (m ? ' (' + m + ')' : ''));
+        console.log('  NextRunTime:    ' + info.NextRunTime);
+    } catch (e) { console.log('  ' + out); }
+}
+
 // --- hlavni smycka ---------------------------------------------------------
 async function main() {
     rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -337,6 +429,8 @@ async function main() {
             else if (cmd === 'x') { if (await removeDestination(cfg)) dirty = true; }
             else if (cmd === 'f') { if (await editExcludes(cfg, 'files')) dirty = true; }
             else if (cmd === 'd') { if (await editExcludes(cfg, 'dirs')) dirty = true; }
+            else if (cmd === 't') { await testDryRun(cfg); }
+            else if (cmd === 's') { await showStatus(cfg); }
             else if (cmd === 'u') {
                 const errs = validateConfig(cfg);
                 if (errs.length) {

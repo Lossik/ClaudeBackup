@@ -8,8 +8,8 @@
 # pres claude-backup-hidden.vbs (skryte okno), ktery propaguje navratovy kod.
 #
 # Navratove kody:
-#   0 = ok (vc. preskocenych zamcenych souboru a nedostupneho volitelneho cile)
-#   1 = doslo ke kopirovaci chybe
+#   0 = ok (vc. preskocenych zamcenych souboru a nedostupneho VOLITELNEHO cile)
+#   1 = kopirovaci chyba NEBO nedostupny povinny (ne-volitelny) cil, kdyz jinak zaloha probehla
 #   2 = zadny cil neni dostupny
 #   3 = config chybi / nejde parsovat / nesedi schema
 #       -> engine se v tomto pripade NIKDY nedostane k robocopy /MIR (nemaze!)
@@ -217,13 +217,14 @@ function Invoke-Mirror($sourcePath, $name, $destRoot, $destName, $opts) {
 }
 
 # --- priprava cilu; nedostupne vyradit ------------------------------------
-$ready     = @()
-$skipNotes = @()
+$ready           = @()
+$skipNotes       = @()
+$missingRequired = @()   # ne-volitelne (povinne) cile, ktere nejsou dostupne
 foreach ($d in $destinations) {
     $root = Resolve-DestRoot $d
     if (-not $root) {
         if ($d.optional) { $skipNotes += "cil  $($d.name)  preskoceno (nedostupny)" }
-        else             { $skipNotes += "cil  $($d.name)  NEDOSTUPNY" }
+        else             { $skipNotes += "cil  $($d.name)  NEDOSTUPNY"; $missingRequired += $d.name }
         continue
     }
     $opts = @($d.robocopyOpts | Where-Object { $_ })
@@ -233,7 +234,7 @@ foreach ($d in $destinations) {
         if ($qualifier -and (Test-Path -LiteralPath "$qualifier\")) {
             $ready += , ([pscustomobject]@{ Name = $d.name; Path = $root; Opts = $opts })
         } elseif ($d.optional) { $skipNotes += "cil  $($d.name)  preskoceno (nedostupny disk)" }
-        else                   { $skipNotes += "cil  $($d.name)  NEDOSTUPNY (disk)" }
+        else                   { $skipNotes += "cil  $($d.name)  NEDOSTUPNY (disk)"; $missingRequired += $d.name }
         continue
     }
     try {
@@ -241,7 +242,7 @@ foreach ($d in $destinations) {
         $ready += , ([pscustomobject]@{ Name = $d.name; Path = $root; Opts = $opts })
     } catch {
         if ($d.optional) { $skipNotes += "cil  $($d.name)  preskoceno (nelze vytvorit: $($_.Exception.Message))" }
-        else             { $skipNotes += "cil  $($d.name)  NEDOSTUPNY (nelze vytvorit: $($_.Exception.Message))" }
+        else             { $skipNotes += "cil  $($d.name)  NEDOSTUPNY (nelze vytvorit: $($_.Exception.Message))"; $missingRequired += $d.name }
     }
 }
 if ($ready.Count -eq 0) {
@@ -332,9 +333,13 @@ foreach ($d in $ready) {
     }
 }
 
-if ($hadError) {
-    Log "=== backup done S CHYBAMI ==="
-    if ($notifyOnError) { Show-Notification 'ClaudeBackup - chyba' 'Zaloha skoncila s chybou kopirovani. Viz _backup.log.' }
+if ($hadError -or $missingRequired.Count) {
+    $reasons = @()
+    if ($missingRequired.Count) { $reasons += "nedostupny povinny cil: $($missingRequired -join ', ')" }
+    if ($hadError)              { $reasons += "chyba kopirovani (viz _backup.log)" }
+    $why = $reasons -join '; '
+    Log "=== backup done S CHYBAMI ($why) ==="
+    if ($notifyOnError) { Show-Notification 'ClaudeBackup - chyba' "$why." }
     exit 1
 }
 Log "=== backup done ok ==="

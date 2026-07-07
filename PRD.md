@@ -1,6 +1,6 @@
 # PRD: ClaudeBackup 2.0 — zálohování řízené configem
 
-**Stav:** návrh — fáze 1 (schéma + engine + výchozí config) implementována a ověřena v sandboxu
+**Stav:** návrh — fáze 1 (engine) a fáze 2 (editor) implementovány a ověřeny
 **Datum:** 2026-07-07
 **Repo:** github.com/Lossik/ClaudeBackup (private)
 
@@ -190,8 +190,8 @@ s exit 3 — nasazení tedy proběhne v pořadí: (1) vygenerovat config,
 
 | Fáze | Obsah | Výstup | Stav |
 |------|-------|--------|------|
-| 1 | Config schéma + engine čte config (chování 1:1 s dneškem) | `config.schema.json`, nový `claude-backup.ps1`, výchozí `config.json` | ✅ implementováno, ověřeno v sandboxu (zbývá ostré ověření) |
-| 2 | Node.js CLI editor (menu, průvodci, validace, atomický zápis) | `claude-backup-cfg` | — |
+| 1 | Config schéma + engine čte config (chování 1:1 s dneškem) | `config.schema.json`, nový `claude-backup.ps1`, výchozí `config.json` | ✅ implementováno, ověřeno v sandboxu i naostro (OneDrive + KINGSTON) |
+| 2 | Node.js CLI editor (menu, průvodci, validace, atomický zápis) | `claude-backup-cfg.js` | ✅ implementováno, ověřeno (27 testů); UI ASCII, bez závislostí |
 | 3 | Dry-run + stav poslední zálohy v editoru | rozšíření CLI | — |
 | 4 | Nasazení: deploy script do `~/.local/bin`, ověření úlohy | `deploy.ps1` | — |
 

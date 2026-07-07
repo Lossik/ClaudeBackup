@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Lossik/ClaudeBackup/config.schema.json",
+  "title": "ClaudeBackup config",
+  "description": "Konfigurace zalohy Claude dat. Jediny zdroj pravdy pro engine (claude-backup.ps1) i editor (claude-backup-cfg). POZOR: robocopy /MIR maze - prazdne sources nebo destinations musi validace odmitnout (engine pak konci exit 3, nikdy nespusti destruktivni /MIR).",
+  "type": "object",
+  "required": ["version", "sources", "excludeFiles", "destinations"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Odkaz na toto schema (napoveda pro editory). Engine ho ignoruje."
+    },
+    "version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "Verze schematu configu. Pro budouci migrace. Neznama verze = validacni chyba (exit 3)."
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Zdroje k zalohovani. Zrcadli se na vsechny cile, pokud nemaji 'onlyDestinations'. Prazdne pole je ZAKAZANE (viz /MIR maze).",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Glob: rozvine se na vic polozek v 'base' podle 'pattern'. Slozky se zrcadli robocopy /MIR, jednotlive soubory se kopiruji.",
+            "required": ["type", "base", "pattern"],
+            "additionalProperties": false,
+            "properties": {
+              "type": { "const": "glob" },
+              "base": { "type": "string", "minLength": 1, "description": "Korenova cesta (env promenne %...% se expanduji za behu)." },
+              "pattern": { "type": "string", "minLength": 1, "description": "Filtr, napr. '.claude*'." },
+              "onlyDestinations": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Jmena cilu, na ktere se tento zdroj zalohuje. Nezadano = na vsechny."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Konkretni slozka (zrcadli se robocopy /MIR).",
+            "required": ["type", "path"],
+            "additionalProperties": false,
+            "properties": {
+              "type": { "const": "dir" },
+              "path": { "type": "string", "minLength": 1, "description": "Cesta ke slozce (env promenne %...% se expanduji za behu)." },
+              "onlyDestinations": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Jmena cilu, na ktere se tento zdroj zalohuje. Nezadano = na vsechny. Nahrazuje puvodni $extraDirsSsdOnly."
+              }
+            }
+          }
+        ]
+      }
+    },
+    "excludeFiles": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Soubory, ktere se NIKDY nezalohuji (predaji se robocopy /XF; v korenu profilu se navic aktivne maze stara kopie v cili).",
+      "items": { "type": "string", "minLength": 1 },
+      "contains": { "const": ".credentials.json" }
+    },
+    "excludeDirs": {
+      "type": "array",
+      "description": "Slozky, ktere se NIKDY nezalohuji (predaji se robocopy /XD). Holé jmeno ('.git') vylouci slozku kdekoli ve strome, plna cesta vylouci konkretni misto. Volitelne; prazdne nebo nezadano = zadne vylouceni. Engine prida /XD jen kdyz je pole neprazdne.",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "destinations": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Cile zalohy. Prazdne pole je ZAKAZANE. Prave jeden cil by mel mit 'primary': true (je v nem log) - kontroluje engine.",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Cil s pevnou cestou.",
+            "required": ["name", "type", "path"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "description": "Jmeno cile (podslozka v cili + reference v onlyDestinations)." },
+              "type": { "const": "path" },
+              "path": { "type": "string", "minLength": 1, "description": "Cilova cesta (env promenne %...% se expanduji za behu)." },
+              "envFallback": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Poradi env promennych zkousenych misto prazdneho %...% v 'path' (napr. OneDrive -> OneDriveConsumer)."
+              },
+              "primary": { "type": "boolean", "description": "Primarni cil - je v nem log." },
+              "optional": { "type": "boolean", "description": "Nedostupny cil se preskoci bez chyby (exit 0)." },
+              "robocopyOpts": {
+                "type": "array",
+                "items": { "type": "string", "pattern": "^/" },
+                "description": "Extra robocopy prepinace pro tento cil (fixni /MIR /XJ ... drzi engine)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Cil hledany podle jmenovky svazku (pismeno disku se meni).",
+            "required": ["name", "type", "label", "subPath"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "type": { "const": "volumeLabel" },
+              "label": { "type": "string", "minLength": 1, "description": "Jmenovka svazku, napr. 'KINGSTON'." },
+              "subPath": { "type": "string", "minLength": 1, "description": "Podcesta na svazku, napr. 'Backups\\claude'." },
+              "primary": { "type": "boolean" },
+              "optional": { "type": "boolean", "description": "Nepripojeny disk se preskoci bez chyby (exit 0)." },
+              "robocopyOpts": {
+                "type": "array",
+                "items": { "type": "string", "pattern": "^/" },
+                "description": "exFAT ma hrube casove razitka -> obvykle '/FFT'."
+              }
+            }
+          }
+        ]
+      }
+    },
+    "log": {
+      "type": "object",
+      "description": "Log v primarnim cili.",
+      "required": ["file"],
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string", "minLength": 1, "description": "Jmeno log souboru, napr. '_backup.log'." },
+        "maxSizeKB": { "type": "integer", "minimum": 1, "description": "Nad tuto velikost se log orizne na 'keepLines' radku." },
+        "keepLines": { "type": "integer", "minimum": 1, "description": "Kolik poslednich radku ponechat pri orezu." }
+      }
+    }
+  }
+}

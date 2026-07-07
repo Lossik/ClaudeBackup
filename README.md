@@ -84,6 +84,7 @@ deploy.ps1 -Rollback  # obnoví předchozí (legacy) engine ze zálohy .bak
 
 ## Návratové kódy enginu
 
-`0` ok (vč. přeskočených zamčených souborů a nepřipojeného SSD) · `1` chyba
-kopírování · `2` žádný cíl dostupný · `3` config chybí / nevalidní (engine se pak
-**nedostane** k `robocopy /MIR`). Plánovač je ukazuje v `LastTaskResult`.
+`0` ok (vč. přeskočených zamčených souborů a nepřipojeného **volitelného** cíle) ·
+`1` chyba kopírování **nebo nedostupný povinný cíl** (když jinak záloha proběhla —
+navíc přijde toast) · `2` žádný cíl dostupný · `3` config chybí / nevalidní (engine
+se pak **nedostane** k `robocopy /MIR`). Plánovač je ukazuje v `LastTaskResult`.

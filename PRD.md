@@ -1,6 +1,6 @@
 # PRD: ClaudeBackup 2.0 — zálohování řízené configem
 
-**Stav:** návrh
+**Stav:** ✅ hotovo — fáze 1–4 implementovány, ověřeny a **nasazeny** (naplánovaná úloha běží na novém config-driven enginu). Navíc: Windows notifikace při selhání, editace intervalu úlohy.
 **Datum:** 2026-07-07
 **Repo:** github.com/Lossik/ClaudeBackup (private)
 
@@ -43,7 +43,9 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
 - Verzování / retence záloh (robocopy `/MIR` zůstává — poslední stav, ne historie).
 - Šifrování, komprese, cloud API (S3 apod.).
 - GUI aplikace / web UI — začínáme CLI, GUI případně později.
-- Správa samotné naplánované úlohy (interval, trigger) — úloha zůstává, jak je.
+- Plná správa naplánované úlohy (vytvoření, přidávání/odebírání triggerů) —
+  mimo **interval opakování**, který editor nově umí měnit (viz § 8). Struktura
+  triggerů (logon + repetice) i akce zůstávají.
 
 ## 5. Návrh řešení
 
@@ -88,12 +90,18 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
     { "type": "dir",   "path": "%USERPROFILE%\\.config\\claude-backup" }
   ],
   "excludeFiles": [".credentials.json"],
+  "excludeDirs": [
+    "node_modules", "__pycache__", ".venv", ".cache", "Cache",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".next", ".turbo", "tmp", "temp"
+  ],
   "destinations": [
     {
       "name": "OneDrive",
       "type": "path",
       "path": "%OneDrive%\\Backups\\claude",
-      "primary": true
+      "envFallback": ["OneDrive", "OneDriveConsumer"],
+      "primary": true,
+      "robocopyOpts": []
     },
     {
       "name": "extSSD",
@@ -104,33 +112,56 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
       "optional": true
     }
   ],
-  "destinationFilters": {
-    "extSSD": { "extraSources": [] }
-  },
-  "log": { "file": "_backup.log", "maxSizeKB": 1024, "keepLines": 300 }
+  "log": { "file": "_backup.log", "maxSizeKB": 1024, "keepLines": 300 },
+  "notify": { "onError": true },
+  "schedule": { "taskName": "ClaudeBackup", "intervalMinutes": 10 }
 }
 ```
 
 Klíčové vlastnosti:
 
-- **`sources`** — tři typy: `glob` (dnešní `.claude*`), `dir` (konkrétní
+- **`sources`** — dva typy: `glob` (dnešní `.claude*`) a `dir` (konkrétní
   složka), do budoucna snadno rozšiřitelné. Proměnné prostředí (`%...%`)
-  se expandují za běhu.
-- **`destinations`** — `type: "path"` (pevná cesta) vs. `type: "volumeLabel"`
-  (najdi disk podle jmenovky — písmeno se mění). `optional: true` = když
-  není dostupný, přeskočit bez chyby (dnešní chování SSD).
-- **`destinationFilters`** — náhrada dnešního `$extraDirsSsdOnly` (velké
-  složky jen na SSD, OneDrive má 5 GB limit).
+  se expandují za běhu. Podsložka v cíli se u zdroje pod profilem odvozuje
+  relativně k `%USERPROFILE%` (`.local\bin` → `<cíl>\.local\bin`, 1:1 s legacy),
+  jinak z názvu složky.
+- **`excludeFiles`** → robocopy `/XF`; **`excludeDirs`** → robocopy `/XD`
+  (přidáno jako protějšek k souborům). `.credentials.json` v `excludeFiles`
+  je povinné (vynucuje schéma i engine). `excludeDirs` je volitelné, smí být
+  prázdné a má výchozí sadu cache/temp/build složek; `/XD` se přidá jen když
+  je pole neprázdné.
+- **`destinations`** — `type: "path"` (pevná cesta; `envFallback` uvádí náhradní
+  proměnné, když je hlavní `%...%` prázdná — degraduje až na `%USERPROFILE%\…`)
+  vs. `type: "volumeLabel"` (najdi disk podle jmenovky — písmeno se mění).
+  `optional: true` = nedostupný cíl se přeskočí bez chyby (dnešní chování SSD).
+  Právě jeden cíl musí mít `primary: true` (je v něm log) — hlídá engine.
+- **`onlyDestinations`** (na úrovni zdroje) — náhrada původního
+  `destinationFilters` / `$extraDirsSsdOnly`: zdroj se zálohuje jen na
+  vyjmenované cíle (velké složky jen na SSD, OneDrive má 5 GB limit).
+  Nezadáno = na všechny cíle.
+- **`notify`** (volitelné) — `onError` zapíná Windows toast při selhání zálohy
+  (exit 1/2/3). Když blok chybí, notifikace jsou zapnuté (ekvivalent `true`).
+- **`schedule`** (volitelné) — `intervalMinutes` = interval opakování zálohy,
+  `taskName` = jméno úlohy. Editor (`[i]`) ho mění a umí ho aplikovat rovnou na
+  živou úlohu. Engine `schedule` ignoruje (je to stav plánovače, ne obsah zálohy).
 - **`version`** — pro budoucí migrace schématu.
 
 ### 5.4 Validace a chování při chybě
 
-- Engine: config chybí / nejde parsovat / nesedí schéma → **exit 3**
-  (nový kód), zápis do logu; Plánovač chybu ukáže v LastTaskResult.
+- Engine config **znovu validuje** (nezávisle na schématu — obrana před
+  spuštěním `/MIR` nad rozbitým configem): neprázdné `sources` i `destinations`,
+  přítomnost `.credentials.json` v `excludeFiles`, právě jeden `primary` cíl,
+  platný `type` u zdrojů/cílů a `onlyDestinations` odkazující na existující cíl.
+- Config chybí / nejde parsovat / neprojde validací → **exit 3** (nový kód).
+  Diagnostika jde do `_engine.log` **vedle configu** (reálný `_backup.log`
+  v cíli ještě neznáme, případně je cíl nedostupný); Plánovač chybu ukáže
+  v LastTaskResult. Engine se v tomto případě **nikdy nedostane k robocopy**.
 - Editor: validuje před uložením; zapisuje atomicky (temp soubor + rename)
   a před přepsáním uloží zálohu `config.json.bak`.
-- Repo obsahuje `config.schema.json` (JSON Schema) — sdílená definice pro
-  editor i případnou editaci v IDE.
+- Repo obsahuje **kanonický** `config.schema.json` (JSON Schema); jeho kopie
+  se nasazuje **vedle configu** (`$schema: "./config.schema.json"`), aby odkaz
+  fungoval a engine měl schéma lokálně. Schéma vynucuje `minItems: 1` na
+  `sources`/`destinations` a `contains` `.credentials.json` v `excludeFiles`.
 
 ### 5.5 Konfigurační UX (`claude-backup-cfg`)
 
@@ -143,7 +174,7 @@ Zdroje:                        Cíle:
   1. ~\.claude*  (glob)          A. OneDrive  ~\OneDrive\Backups\claude  [primární]
   2. ~\.local\bin                B. extSSD    KINGSTON:\Backups\claude   [volitelný]
   3. ~\Claude
-Výjimky: .credentials.json
+Výjimky: soubory: .credentials.json  |  složky: node_modules, tmp, …
 
 [p] přidat zdroj   [o] odebrat zdroj   [c] přidat cíl   [x] odebrat cíl
 [v] výjimky        [t] test (dry-run)  [s] stav poslední zálohy   [q] konec
@@ -164,14 +195,21 @@ odpovídající dnešnímu zadrátovanému nastavení. Engine bez configu spadne
 s exit 3 — nasazení tedy proběhne v pořadí: (1) vygenerovat config,
 (2) nasadit nový engine, (3) ověřit ručním spuštěním úlohy.
 
+Nasazení automatizuje **`deploy.ps1`**: zálohuje legacy engine (`.bak`), zkopíruje
+`claude-backup.ps1` + `claude-backup-cfg.js` (+ `.cmd` wrapper volající portable
+node) do `~/.local/bin`, nasadí schéma vedle configu, srovná interval úlohy dle
+`schedule.intervalMinutes` a ověří vše dry-runem. Má `-WhatIf` (náhled) a
+`-Rollback` (obnova legacy). Přepnutí úlohy = nahrazení `claude-backup.ps1`
+(VBS wrapper i úloha zůstávají).
+
 ## 6. Fáze
 
-| Fáze | Obsah | Výstup |
-|------|-------|--------|
-| 1 | Config schéma + engine čte config (chování 1:1 s dneškem) | `config.schema.json`, nový `claude-backup.ps1`, výchozí `config.json` |
-| 2 | Node.js CLI editor (menu, průvodci, validace, atomický zápis) | `claude-backup-cfg` |
-| 3 | Dry-run + stav poslední zálohy v editoru | rozšíření CLI |
-| 4 | Nasazení: deploy script do `~/.local/bin`, ověření úlohy | `deploy.ps1` |
+| Fáze | Obsah | Výstup | Stav |
+|------|-------|--------|------|
+| 1 | Config schéma + engine čte config (chování 1:1 s dneškem) | `config.schema.json`, nový `claude-backup.ps1`, výchozí `config.json` | ✅ implementováno, ověřeno v sandboxu i naostro (OneDrive + KINGSTON) |
+| 2 | Node.js CLI editor (menu, průvodci, validace, atomický zápis) | `claude-backup-cfg.js` | ✅ implementováno, ověřeno (27 testů); UI ASCII, bez závislostí |
+| 3 | Dry-run + stav poslední zálohy v editoru | rozšíření CLI (`[t]`/`[s]`) | ✅ implementováno, ověřeno (36 testů) + reálný smoke |
+| 4 | Nasazení: deploy script do `~/.local/bin`, ověření úlohy | `deploy.ps1` | ✅ nasazeno naostro; úloha běží na novém enginu (LastTaskResult 0, `.config\claude-backup` v logu). Legacy záloha + `-Rollback`, `-WhatIf` náhled |
 
 ## 7. Akceptační kritéria
 
@@ -186,10 +224,25 @@ s exit 3 — nasazení tedy proběhne v pořadí: (1) vygenerovat config,
 ## 8. Rizika a otevřené otázky
 
 - **Rozbitý config + `/MIR`**: `/MIR` maže — prázdný seznam zdrojů by mohl
-  smazat obsah cíle. Mitigace: validace odmítne prázdné `sources`/`destinations`
-  (kritérium 4).
+  smazat obsah cíle. Mitigace: validace (schéma i engine) odmítne prázdné
+  `sources`/`destinations` → exit 3 před robocopy. **Implementováno a ověřeno**
+  v sandboxu (kritérium 4).
+- **~~Délka cílové cesty (MAX_PATH)~~** — ✅ vyřešeno: `robocopy /MIR` je
+  long-path-aware, mirror zvládá cílové cesty i výrazně přes 260 znaků
+  (ověřeno: 266 i 512 znaků → exit 0, soubor reálně zkopírován). Engine nemá
+  žádnou jinou operaci citlivou na délku — cílový kořen i kopie kořenových
+  souborů jsou krátké. Praktický strop je limit robocopy (~32 000 znaků).
+  Pozn.: nástroje s `Get-ChildItem -Recurse` na cesty >260 nedosáhnou, ale to
+  je limit toho nástroje, ne zálohy.
 - **Souběh editoru a běžící zálohy**: úloha běží každých 10 min; atomický
   zápis configu stačí (engine čte config jednou na začátku).
-- **Otevřená otázka:** má editor umět měnit i interval úlohy v Plánovači?
-  (Zatím ne-cíl, ale schéma na to nechává prostor.)
-- **Otevřená otázka:** notifikace při opakovaném selhání zálohy (toast)?
+- **~~Otevřená otázka:~~ editor mění interval úlohy** — ✅ vyřešeno:
+  `schedule.intervalMinutes` v configu; editor (`[i]`) interval mění a umí ho
+  aplikovat rovnou na živou úlohu přes `Set-ScheduledTask` (ověřeno bez admina —
+  úloha má RunLevel Limited). Mění se jen repetice time triggeru; logon trigger
+  i akce zůstávají. Ostatní správa úlohy dál ne-cíl (§ 4).
+- **~~Otevřená otázka:~~ notifikace při selhání zálohy (toast)** — ✅ vyřešeno:
+  engine při exit 1/2/3 zobrazí Windows toast (`NotifyIcon`, bez závislostí,
+  best-effort). Řízeno `notify.onError` (default zap i bez bloku), potlačeno
+  v `-DryRun`/`-NoNotify`, přepínatelné v editoru (`[n]`). Pozn.: zatím bez
+  omezení frekvence — při trvalé chybě toast každých 10 min (lze doplnit stav).

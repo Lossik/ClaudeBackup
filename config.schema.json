@@ -129,6 +129,14 @@
         "maxSizeKB": { "type": "integer", "minimum": 1, "description": "Nad tuto velikost se log orizne na 'keepLines' radku." },
         "keepLines": { "type": "integer", "minimum": 1, "description": "Kolik poslednich radku ponechat pri orezu." }
       }
+    },
+    "notify": {
+      "type": "object",
+      "description": "Notifikace do Windows (NotifyIcon toast) pri selhani zalohy. Volitelne; kdyz blok chybi, engine oznamuje chyby ve vychozim stavu (ekvivalent onError:true).",
+      "additionalProperties": false,
+      "properties": {
+        "onError": { "type": "boolean", "description": "Oznamit selhani zalohy (exit 1/2/3) toastem. Vychozi true." }
+      }
     }
   }
 }

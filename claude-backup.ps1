@@ -16,13 +16,40 @@
 #
 # Prepinac -DryRun: vypise co by se stalo (robocopy /L) bez jakychkoli zmen na
 # disku (nevytvari cile, nekopiruje, nemaze, nezapisuje log). Pro overeni configu.
+#
+# Pri selhani (exit 1/2/3) engine zobrazi Windows notifikaci (NotifyIcon toast),
+# pokud to config nezakazuje (notify.onError:false), neni -NoNotify ani -DryRun.
 
 param(
     [string]$ConfigPath = (Join-Path $env:USERPROFILE '.config\claude-backup\config.json'),
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$NoNotify
 )
 
 $ErrorActionPreference = 'Stop'
+
+# --- notifikace ------------------------------------------------------------
+# Oznamit selhani do Windows (best-effort; nikdy nesmi shodit zalohu). V dry-run
+# a s -NoNotify se nezobrazuje. Config to muze vypnout pres notify.onError:false.
+$notifyOnError = -not $NoNotify
+
+function Show-Notification($title, $text) {
+    if ($DryRun) { return }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        $ni = New-Object System.Windows.Forms.NotifyIcon
+        $ni.Icon = [System.Drawing.SystemIcons]::Warning
+        $ni.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Error
+        $ni.BalloonTipTitle = $title
+        $ni.BalloonTipText = $text
+        $ni.Visible = $true
+        $ni.ShowBalloonTip(10000)
+        Start-Sleep -Seconds 5   # nechat toast dorucit (balloon zije s procesem)
+        $ni.Visible = $false
+        $ni.Dispose()
+    } catch { }
+}
 
 # --- bootstrap log ---------------------------------------------------------
 # Realny log zname az z configu; chyby configu (exit 3) i nedostupnost cilu
@@ -40,6 +67,7 @@ function Write-BootLog($m) {
 function Stop-BadConfig($msg) {
     Write-BootLog "CONFIG CHYBA: $msg"
     Write-BootLog "=== backup NESPUSTEN (exit 3) ==="
+    if ($notifyOnError) { Show-Notification 'ClaudeBackup - chyba configu' "Zaloha nebezela: $msg" }
     exit 3
 }
 
@@ -53,6 +81,9 @@ try {
 } catch {
     Stop-BadConfig "config nejde precist/parsovat: $($_.Exception.Message)"
 }
+
+# notify preference z configu (jen zpresnuje default; -NoNotify/-DryRun ma prednost)
+if ($cfg.notify -and ($cfg.notify.onError -eq $false)) { $notifyOnError = $false }
 
 # --- validace --------------------------------------------------------------
 # Schema tohle hlida taky, ale engine si to overi znovu: obrana pred spustenim
@@ -214,6 +245,7 @@ foreach ($d in $destinations) {
 if ($ready.Count -eq 0) {
     Write-BootLog "zadny cil neni dostupny (exit 2)"
     foreach ($n in $skipNotes) { Write-BootLog $n }
+    if ($notifyOnError) { Show-Notification 'ClaudeBackup - zadny cil' 'Zadny cil zalohy neni dostupny (OneDrive i SSD).' }
     exit 2
 }
 
@@ -300,6 +332,7 @@ foreach ($d in $ready) {
 
 if ($hadError) {
     Log "=== backup done S CHYBAMI ==="
+    if ($notifyOnError) { Show-Notification 'ClaudeBackup - chyba' 'Zaloha skoncila s chybou kopirovani. Viz _backup.log.' }
     exit 1
 }
 Log "=== backup done ok ==="

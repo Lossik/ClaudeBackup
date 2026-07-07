@@ -55,7 +55,8 @@ function defaultConfig() {
             { name: 'OneDrive', type: 'path', path: '%OneDrive%\\Backups\\claude', envFallback: ['OneDrive', 'OneDriveConsumer'], primary: true, robocopyOpts: [] },
             { name: 'extSSD', type: 'volumeLabel', label: 'KINGSTON', subPath: 'Backups\\claude', robocopyOpts: ['/FFT'], optional: true }
         ],
-        log: { file: '_backup.log', maxSizeKB: 1024, keepLines: 300 }
+        log: { file: '_backup.log', maxSizeKB: 1024, keepLines: 300 },
+        notify: { onError: true }
     };
 }
 
@@ -116,6 +117,11 @@ function validateConfig(cfg) {
     if (!ef.includes('.credentials.json')) e.push("excludeFiles: musi obsahovat '.credentials.json' (tokeny se nesmi zalohovat)");
 
     if (cfg.excludeDirs !== undefined && !Array.isArray(cfg.excludeDirs)) e.push("excludeDirs: musi byt pole");
+
+    if (cfg.notify !== undefined) {
+        if (typeof cfg.notify !== 'object' || Array.isArray(cfg.notify)) e.push("notify: musi byt objekt");
+        else if (cfg.notify.onError !== undefined && typeof cfg.notify.onError !== 'boolean') e.push("notify.onError: musi byt boolean");
+    }
 
     const dts = Array.isArray(cfg.destinations) ? cfg.destinations : [];
     if (dts.length < 1) e.push("destinations: musi mit aspon 1 polozku");
@@ -197,6 +203,7 @@ function csvToArr(s) { return String(s).split(',').map(x => x.trim()).filter(Boo
 
 // --- render ----------------------------------------------------------------
 function letter(i) { return String.fromCharCode(65 + i); }
+function notifyEnabled(cfg) { return !(cfg.notify && cfg.notify.onError === false); }
 
 function srcLabel(s) {
     if (s.type === 'glob') return `glob   base=${s.base}  pattern=${s.pattern}`;
@@ -230,9 +237,10 @@ function render(cfg, dirty) {
     console.log('Vyjimky:');
     console.log('  soubory: ' + (cfg.excludeFiles || []).join(', '));
     console.log('  slozky:  ' + ((cfg.excludeDirs && cfg.excludeDirs.length) ? cfg.excludeDirs.join(', ') : '(zadne)'));
+    console.log('Notifikace pri chybe: ' + (notifyEnabled(cfg) ? 'ZAP (Windows toast)' : 'vyp'));
     console.log('------------------------------------------------------------');
     console.log('[p] pridat zdroj   [o] odebrat zdroj   [c] pridat cil   [x] odebrat cil');
-    console.log('[f] vyjimky-soubory   [d] vyjimky-slozky');
+    console.log('[f] vyjimky-soubory   [d] vyjimky-slozky   [n] notifikace zap/vyp');
     console.log('[t] test (dry-run)   [s] stav   [u] ulozit   [q] konec');
 }
 
@@ -431,6 +439,12 @@ async function main() {
             else if (cmd === 'd') { if (await editExcludes(cfg, 'dirs')) dirty = true; }
             else if (cmd === 't') { await testDryRun(cfg); }
             else if (cmd === 's') { await showStatus(cfg); }
+            else if (cmd === 'n') {
+                if (!cfg.notify) cfg.notify = {};
+                cfg.notify.onError = !notifyEnabled(cfg);
+                dirty = true;
+                console.log('  notifikace pri chybe: ' + (cfg.notify.onError ? 'ZAP' : 'vyp'));
+            }
             else if (cmd === 'u') {
                 const errs = validateConfig(cfg);
                 if (errs.length) {

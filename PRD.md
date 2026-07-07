@@ -110,7 +110,8 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
       "optional": true
     }
   ],
-  "log": { "file": "_backup.log", "maxSizeKB": 1024, "keepLines": 300 }
+  "log": { "file": "_backup.log", "maxSizeKB": 1024, "keepLines": 300 },
+  "notify": { "onError": true }
 }
 ```
 
@@ -135,6 +136,8 @@ Klíčové vlastnosti:
   `destinationFilters` / `$extraDirsSsdOnly`: zdroj se zálohuje jen na
   vyjmenované cíle (velké složky jen na SSD, OneDrive má 5 GB limit).
   Nezadáno = na všechny cíle.
+- **`notify`** (volitelné) — `onError` zapíná Windows toast při selhání zálohy
+  (exit 1/2/3). Když blok chybí, notifikace jsou zapnuté (ekvivalent `true`).
 - **`version`** — pro budoucí migrace schématu.
 
 ### 5.4 Validace a chování při chybě
@@ -219,4 +222,8 @@ s exit 3 — nasazení tedy proběhne v pořadí: (1) vygenerovat config,
   zápis configu stačí (engine čte config jednou na začátku).
 - **Otevřená otázka:** má editor umět měnit i interval úlohy v Plánovači?
   (Zatím ne-cíl, ale schéma na to nechává prostor.)
-- **Otevřená otázka:** notifikace při opakovaném selhání zálohy (toast)?
+- **~~Otevřená otázka:~~ notifikace při selhání zálohy (toast)** — ✅ vyřešeno:
+  engine při exit 1/2/3 zobrazí Windows toast (`NotifyIcon`, bez závislostí,
+  best-effort). Řízeno `notify.onError` (default zap i bez bloku), potlačeno
+  v `-DryRun`/`-NoNotify`, přepínatelné v editoru (`[n]`). Pozn.: zatím bez
+  omezení frekvence — při trvalé chybě toast každých 10 min (lze doplnit stav).

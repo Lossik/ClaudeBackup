@@ -10,7 +10,7 @@
 //
 // ZADNE externi zavislosti (jen vestaveny readline). Node je portable v
 // ~/.local/nodejs, volat absolutni cestou (viz wrapper claude-backup-cfg.cmd, faze 4).
-// UI je zamerne ASCII (konzolova bezpecnost, shodne s legacy scripty).
+// UI je zamerne ASCII (konzolova bezpecnost, kvuli kodovani konzole).
 //
 // Argumenty:  --config <cesta>   (jinak vychozi cesta v profilu)
 //
@@ -37,7 +37,7 @@ const POWERSHELL = process.env.SystemRoot
     ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
     : 'powershell.exe';
 
-// --- vychozi config (1:1 s legacy + faze 1) --------------------------------
+// --- vychozi config (puvodni zadratovana sada zdroju a cilu) ----------------
 function defaultConfig() {
     return {
         $schema: SCHEMA_HINT,
@@ -53,7 +53,7 @@ function defaultConfig() {
             '.mypy_cache', '.pytest_cache', '.ruff_cache', '.next', '.turbo', 'tmp', 'temp'],
         destinations: [
             { name: 'OneDrive', type: 'path', path: '%OneDrive%\\Backups\\claude', envFallback: ['OneDrive', 'OneDriveConsumer'], primary: true, robocopyOpts: [] },
-            { name: 'extSSD', type: 'volumeLabel', label: 'KINGSTON', subPath: 'Backups\\claude', robocopyOpts: ['/FFT'], optional: true }
+            { name: 'extSSD', type: 'volumeLabel', label: 'BACKUP_SSD', subPath: 'Backups\\claude', robocopyOpts: ['/FFT'], optional: true }
         ],
         log: { file: '_backup.log', maxSizeKB: 1024, keepLines: 300 },
         notify: { onError: true },
@@ -331,7 +331,7 @@ async function addDestination(cfg) {
         const fb = csvToArr(await ask('  envFallback - nahradni promenne (prazdne = zadne): '));
         if (fb.length) dest.envFallback = fb;
     } else {
-        dest.label = await askNonEmpty('  jmenovka svazku (napr. KINGSTON): ');
+        dest.label = await askNonEmpty('  jmenovka svazku (napr. BACKUP_SSD): ');
         dest.subPath = await askNonEmpty('  podcesta na svazku (napr. Backups\\claude): ');
     }
     const opts = csvToArr(await ask('  robocopy prepinace navic (napr. /FFT; prazdne = zadne): '));
@@ -552,7 +552,7 @@ async function main() {
     try {
         if (loaded.status === 'missing') {
             console.log('Config neexistuje: ' + CONFIG_PATH);
-            const ok = await askYesNo('Vytvorit vychozi config (odpovida legacy)?', true);
+            const ok = await askYesNo('Vytvorit vychozi config (vychozi sada zdroju a cilu)?', true);
             if (!ok) { rl.close(); return; }
             cfg = defaultConfig();
             dirty = true;

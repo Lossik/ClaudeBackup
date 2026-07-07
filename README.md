@@ -24,6 +24,23 @@ Naplánovaná úloha `ClaudeBackup` (po přihlášení + každých 10 min) →
 `claude-backup-hidden.vbs` (skryté okno) → `claude-backup.ps1` (engine). Engine
 načte config, zvaliduje ho a zrcadlí zdroje na cíle přes `robocopy /MIR`. Rozbitý
 config = čistý pád (exit 3) bez mazání; selhání → Windows notifikace (toast).
+Jeden běh trvá typicky 1–2 s (inkrementální — kopírují se jen změny).
+
+## Prerekvizity a první nasazení
+
+Jednorázově (např. na novém stroji):
+
+1. **Portable Node.js** v `~/.local/nodejs\node.exe` — editor ho volá absolutní
+   cestou (není v PATH).
+2. **Vytvořit config** — spusť `claude-backup-cfg`; když config neexistuje,
+   nabídne vygenerovat výchozí (odpovídá původnímu zadrátovanému nastavení),
+   pak `u` (uložit).
+3. **Nasadit** — `deploy.ps1` (zkopíruje engine + editor do `~/.local/bin`,
+   schéma vedle configu).
+4. **Naplánovaná úloha `ClaudeBackup`** musí existovat (spouští ji VBS wrapper).
+   Její *vytvoření* je mimo deploy — deploy jen přepíná engine a srovnává interval.
+
+Pořadí je důležité: engine bez configu končí exit 3, takže **config musí být první**.
 
 ## Používání editoru
 
@@ -37,8 +54,8 @@ Ukáže přehled (zdroje, cíle, výjimky, notifikace, interval) a menu příkaz
 
 | Klávesa | Akce |
 |---|---|
-| `p` / `o` | přidat / odebrat **zdroj** (`glob` nebo `dir`; zdroj lze omezit na konkrétní cíle) |
-| `c` / `x` | přidat / odebrat **cíl** (pevná cesta, nebo disk podle jmenovky svazku) |
+| `p` / `o` / `ec` | přidat / odebrat / **upravit** zdroj (`glob` nebo `dir`; lze omezit na konkrétní cíle) |
+| `c` / `x` / `ep` | přidat / odebrat / **upravit** cíl (pevná cesta, nebo disk podle jmenovky svazku) |
 | `f` / `d` | **výjimky** souborů / složek (`+jmeno` přidá, `-jmeno` odebere, prázdné = zpět) |
 | `n` | **notifikace** při chybě zap/vyp (Windows toast) |
 | `i` | **interval** úlohy — změní minuty a nabídne aplikovat rovnou na živou úlohu |
@@ -67,12 +84,34 @@ u   # ulož
 
 Velkou složku jen na SSD (OneDrive má ~5 GB limit) — u „omezit na cíle" zadej `extSSD`.
 
+Přehodit primární cíl / změnit cestu / (ne)volitelnost existujícího cíle:
+
+```
+ep → (písmeno cíle) → p=primární · o=volitelný · c=cesta · r=robocopyOpts → z
+u
+```
+
 Změnit interval zálohy na 5 minut:
 
 ```
 i → 5 → aplikovat na živou úlohu? a
 u
 ```
+
+## Volitelné vs povinné cíle
+
+Každý cíl je buď **volitelný** (`optional: true`), nebo **povinný** (bez `optional`):
+
+- **Volitelný** — nedostupný cíl (typicky odpojený externí SSD) engine **tiše
+  přeskočí** (exit 0). Pro disk, který nebývá připojený pořád.
+- **Povinný** — nedostupný cíl → engine **pošle toast a skončí exit 1** (i když
+  ostatní cíle vyšly), a to při **každém běhu** (co 10 min), dokud cíl chybí.
+  Pro cíl, který má být vždy dostupný — dozvíš se, když vypadne.
+
+Když jsou nedostupné **všechny** cíle, engine skončí exit 2.
+
+Pozn.: zdroj s `onlyDestinations` (např. velká složka jen na SSD) se při
+odpojeném disku **nezálohuje nikam** — má kopii jen na tom jednom cíli.
 
 ## Nasazení / rollback
 
@@ -81,6 +120,23 @@ deploy.ps1            # nasadí engine + editor + wrapper do ~/.local/bin, přep
 deploy.ps1 -WhatIf    # jen ukáže, co by udělal (nic nemění)
 deploy.ps1 -Rollback  # obnoví předchozí (legacy) engine ze zálohy .bak
 ```
+
+Přepnutí úlohy na nový engine = nahrazení `~/.local/bin/claude-backup.ps1` (VBS
+wrapper i úloha zůstávají). Interval se srovná dle `schedule.intervalMinutes`.
+
+## Obnova (kde jsou data)
+
+Záloha je **zrcadlo posledního stavu** (`robocopy /MIR`), ne historie verzí.
+Data najdeš přímo v cíli:
+
+- **OneDrive:** `%OneDrive%\Backups\claude\` (je tu i log `_backup.log`)
+- **externí SSD:** `KINGSTON:\Backups\claude\` (písmeno disku se mění — hledá se podle jmenovky svazku)
+
+Obnova = zkopírovat složky zpět (např. `…\Backups\claude\.claude` zpět do
+`%USERPROFILE%`). Struktura pod `Backups\claude` odpovídá cestám v profilu.
+
+⚠️ `/MIR` je **zrcadlo, ne archiv** — když v profilu soubor smažeš, při dalším
+běhu zmizí i ze zálohy. Není to ochrana proti „smazal jsem to omylem minulý týden".
 
 ## Návratové kódy enginu
 

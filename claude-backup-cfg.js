@@ -172,7 +172,8 @@ function saveConfig(cfg) {
     const bak = CONFIG_PATH + '.bak';
     if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
     fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
-    if (fs.existsSync(CONFIG_PATH)) fs.copyFileSync(CONFIG_PATH, bak);
+    const madeBackup = fs.existsSync(CONFIG_PATH);
+    if (madeBackup) fs.copyFileSync(CONFIG_PATH, bak);
     try {
         fs.renameSync(tmp, CONFIG_PATH);
     } catch (err) {
@@ -180,6 +181,7 @@ function saveConfig(cfg) {
         fs.rmSync(CONFIG_PATH, { force: true });
         fs.renameSync(tmp, CONFIG_PATH);
     }
+    return madeBackup;   // true = puvodni config existoval a byl zazalohovan do .bak
 }
 
 // --- readline (vlastni radkova fronta - odolne vuci davkovemu stdin) --------
@@ -610,7 +612,11 @@ async function main() {
                     console.log('\nNELZE ULOZIT - config neni platny:');
                     errs.forEach(x => console.log('  * ' + x));
                 } else {
-                    try { saveConfig(cfg); dirty = false; console.log('\nUlozeno: ' + CONFIG_PATH + '  (zaloha: config.json.bak)'); }
+                    try {
+                        const madeBackup = saveConfig(cfg);
+                        dirty = false;
+                        console.log('\nUlozeno: ' + CONFIG_PATH + (madeBackup ? '  (zaloha: config.json.bak)' : '  (prvni ulozeni - bez zalohy)'));
+                    }
                     catch (err) { console.log('\nCHYBA pri ukladani: ' + err.message); }
                 }
             }

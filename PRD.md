@@ -1,6 +1,6 @@
 # PRD: ClaudeBackup 2.0 — zálohování řízené configem
 
-**Stav:** návrh — fáze 1–3 (engine, editor, dry-run/stav) implementovány a ověřeny; zbývá fáze 4 (nasazení)
+**Stav:** ✅ hotovo — fáze 1–4 implementovány, ověřeny a **nasazeny** (naplánovaná úloha běží na novém config-driven enginu). Navíc: Windows notifikace při selhání, editace intervalu úlohy.
 **Datum:** 2026-07-07
 **Repo:** github.com/Lossik/ClaudeBackup (private)
 
@@ -195,6 +195,13 @@ odpovídající dnešnímu zadrátovanému nastavení. Engine bez configu spadne
 s exit 3 — nasazení tedy proběhne v pořadí: (1) vygenerovat config,
 (2) nasadit nový engine, (3) ověřit ručním spuštěním úlohy.
 
+Nasazení automatizuje **`deploy.ps1`**: zálohuje legacy engine (`.bak`), zkopíruje
+`claude-backup.ps1` + `claude-backup-cfg.js` (+ `.cmd` wrapper volající portable
+node) do `~/.local/bin`, nasadí schéma vedle configu, srovná interval úlohy dle
+`schedule.intervalMinutes` a ověří vše dry-runem. Má `-WhatIf` (náhled) a
+`-Rollback` (obnova legacy). Přepnutí úlohy = nahrazení `claude-backup.ps1`
+(VBS wrapper i úloha zůstávají).
+
 ## 6. Fáze
 
 | Fáze | Obsah | Výstup | Stav |
@@ -202,7 +209,7 @@ s exit 3 — nasazení tedy proběhne v pořadí: (1) vygenerovat config,
 | 1 | Config schéma + engine čte config (chování 1:1 s dneškem) | `config.schema.json`, nový `claude-backup.ps1`, výchozí `config.json` | ✅ implementováno, ověřeno v sandboxu i naostro (OneDrive + KINGSTON) |
 | 2 | Node.js CLI editor (menu, průvodci, validace, atomický zápis) | `claude-backup-cfg.js` | ✅ implementováno, ověřeno (27 testů); UI ASCII, bez závislostí |
 | 3 | Dry-run + stav poslední zálohy v editoru | rozšíření CLI (`[t]`/`[s]`) | ✅ implementováno, ověřeno (36 testů) + reálný smoke |
-| 4 | Nasazení: deploy script do `~/.local/bin`, ověření úlohy | `deploy.ps1` | — |
+| 4 | Nasazení: deploy script do `~/.local/bin`, ověření úlohy | `deploy.ps1` | ✅ nasazeno naostro; úloha běží na novém enginu (LastTaskResult 0, `.config\claude-backup` v logu). Legacy záloha + `-Rollback`, `-WhatIf` náhled |
 
 ## 7. Akceptační kritéria
 

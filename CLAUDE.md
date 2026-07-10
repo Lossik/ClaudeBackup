@@ -17,11 +17,13 @@ Hotovo a nasazeno. Naplánovaná úloha běží na config-driven enginu. Klíčo
   pro záměr; než začneš měnit chování, přečti relevantní část.
 - **`claude-backup.ps1`** (engine, `robocopy /MIR`), **`claude-backup-cfg.js`**
   (Node.js editor), **`claude-restore.ps1`** (obnova zálohy zpět, config-driven),
-  **`config.schema.json`** (validace), **`deploy.ps1`** (nasazení).
-- `README.md`, `.gitignore`.
+  **`claude-backup-watchdog.ps1`** (hlídá, že se záloha vůbec spouští),
+  **`config.schema.json`** (validace), **`deploy.ps1`** (nasazení; `-CreateTask`
+  vytvoří chybějící úlohy).
+- `README.md`, `.gitignore`, **`tests/run-tests.ps1`** (kompletní sandbox testy —
+  po každé netriviální změně je spusť; nic nesahá na reálný config ani cíle).
 
-Původní zadrátovaná verze je v git historii. Není build ani lint; automatizované
-testy nejsou součástí repa.
+Původní zadrátovaná verze je v git historii. Není build ani lint.
 
 ## Cílová architektura
 
@@ -89,7 +91,9 @@ Plánovač → claude-backup-hidden.vbs → powershell -File claude-backup.ps1
 
 Nasazené scripty žijí v `~/.local/bin` (ne v repu); VBS i `.cmd` wrapper generuje
 `deploy.ps1`. Interval úlohy jde měnit editorem (`schedule.intervalMinutes`);
-vytvoření a triggery úlohy jsou mimo deploy.
+chybějící úlohy (`ClaudeBackup` + `ClaudeBackupWatchdog`) vytvoří
+`deploy.ps1 -CreateTask`, existující úlohy deploy nemění (jen interval).
+Watchdog úloha hlídá, že se záloha vůbec spouští (2× denně; toast při problému).
 
 ## Fáze implementace (dle PRD § 6) — hotovo
 

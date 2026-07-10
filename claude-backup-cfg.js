@@ -136,7 +136,10 @@ function validateConfig(cfg) {
 
     if (cfg.notify !== undefined) {
         if (typeof cfg.notify !== 'object' || Array.isArray(cfg.notify)) e.push("notify: musi byt objekt");
-        else if (cfg.notify.onError !== undefined && typeof cfg.notify.onError !== 'boolean') e.push("notify.onError: musi byt boolean");
+        else {
+            if (cfg.notify.onError !== undefined && typeof cfg.notify.onError !== 'boolean') e.push("notify.onError: musi byt boolean");
+            if (cfg.notify.repeatMinutes !== undefined && (!Number.isInteger(cfg.notify.repeatMinutes) || cfg.notify.repeatMinutes < 1)) e.push("notify.repeatMinutes: musi byt cele cislo >= 1");
+        }
     }
 
     if (cfg.schedule !== undefined) {
@@ -680,6 +683,15 @@ async function main() {
                 cfg.notify.onError = !notifyEnabled(cfg);
                 dirty = true;
                 console.log('  notifikace pri chybe: ' + (cfg.notify.onError ? 'ZAP' : 'vyp'));
+                if (cfg.notify.onError) {
+                    const cur = cfg.notify.repeatMinutes || 360;
+                    const a = (await ask('  opakovat toast pri TRVAJICI stejne chybe po minutach (prazdne=' + cur + '): ')).trim();
+                    if (a) {
+                        const m = parseInt(a, 10);
+                        if (!Number.isInteger(m) || m < 1 || String(m) !== a) console.log('  neplatne cislo - nechavam ' + cur + '.');
+                        else { cfg.notify.repeatMinutes = m; console.log('  opakovani toastu: po ' + m + ' min.'); }
+                    }
+                }
             }
             else if (cmd === 'u') {
                 const errs = validateConfig(cfg);

@@ -135,7 +135,8 @@
       "description": "Notifikace do Windows (NotifyIcon toast) pri selhani zalohy. Volitelne; kdyz blok chybi, engine oznamuje chyby ve vychozim stavu (ekvivalent onError:true).",
       "additionalProperties": false,
       "properties": {
-        "onError": { "type": "boolean", "description": "Oznamit selhani zalohy (exit 1/2/3) toastem. Vychozi true." }
+        "onError": { "type": "boolean", "description": "Oznamit selhani zalohy (exit 1/2/3) toastem. Vychozi true." },
+        "repeatMinutes": { "type": "integer", "minimum": 1, "description": "Pri TRVAJICI stejne chybe (beh co ~10 min) se toast opakuje az po tolika minutach (vychozi 360). Jina chyba se oznami hned; uspesny beh stav resetuje (_notify.json vedle configu)." }
       }
     },
     "schedule": {

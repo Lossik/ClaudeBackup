@@ -126,7 +126,8 @@ if ($CreateTask) {
     } else {
         Step "vytvoreni ulohy '$backupTaskName' (po prihlaseni + kazdych $iv min)" {
             $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-            $rep = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $iv) -RepetitionDuration ([TimeSpan]::MaxValue)).Repetition
+            # bez -RepetitionDuration = opakovani bez konce (MaxValue by dal neplatne XML)
+            $rep = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $iv)).Repetition
             $tr  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
             $tr.Repetition = $rep
             $act = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$vbsDst`""
@@ -140,7 +141,7 @@ if ($CreateTask) {
     } else {
         Step "vytvoreni ulohy '$wdTaskName' (po prihlaseni +30 min, pak co 12 h)" {
             $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-            $rep = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 12) -RepetitionDuration ([TimeSpan]::MaxValue)).Repetition
+            $rep = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 12)).Repetition
             $tr  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
             $tr.Delay = 'PT30M'
             $tr.Repetition = $rep

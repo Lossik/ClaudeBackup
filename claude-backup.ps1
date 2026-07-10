@@ -10,6 +10,11 @@
 # smazat data druheho. Kolizi slugu (ruzne koreny -> stejny slug) odmita
 # validace jako chybu configu (exit 3).
 #
+# Kos (volitelny, per cil pres trash.keepDays): polozky, ktere by /MIR smazal,
+# se misto toho presunou do <cil>\_kos\<datum>\<slug>\<cesta> a drzi se
+# keepDays dni (pak je purge smaze). Ochrana proti "smazal jsem to omylem" -
+# na OneDrive nechavej vypnuty (ma vlastni kos i verzovani, setri 5GB kvotu).
+#
 # Spousteno naplanovanou ulohou ClaudeBackup (po prihlaseni + kazdych 10 min)
 # pres claude-backup-hidden.vbs (skryte okno), ktery propaguje navratovy kod.
 #
@@ -149,6 +154,12 @@ foreach ($d in $destinations) {
         'volumeLabel' { if (-not $d.label -or -not $d.subPath) { Stop-BadConfig "cil '$($d.name)' typu volumeLabel nema label/subPath" } }
         default { Stop-BadConfig "cil '$($d.name)' ma neznamy typ: '$($d.type)'" }
     }
+    if ($d.trash) {
+        $kd = 0
+        if (-not [int]::TryParse("$($d.trash.keepDays)", [ref]$kd) -or $kd -lt 1) {
+            Stop-BadConfig "cil '$($d.name)' ma neplatny trash.keepDays (cekam cele cislo >= 1)"
+        }
+    }
     $destNames += $d.name
 }
 
@@ -230,32 +241,77 @@ function Resolve-DestRoot($d) {
     return $null
 }
 
-function Invoke-Mirror($sourcePath, $name, $destRoot, $destName, $opts) {
+# Datum behu pro kos - jeden beh = jedna datova slozka v _kos.
+$trashDate = [DateTime]::Now.ToString('yyyy-MM-dd')
+
+function Move-ExtrasToTrash($baseArgs, $target, $destRoot, $name, $destName) {
+    # Pre-pass /MIR /L se STEJNYMI argumenty jako ostry mirror: co by /MIR
+    # smazal, hlasi radky '*EXTRA File/Dir' (tagy jsou anglicke i na ceskych
+    # Windows; /FP = plne cesty). Tyto polozky se PRESUNOU do
+    # <cil>\_kos\<datum>\<name>\<relativni cesta> (move na stejnem svazku =
+    # rename, zadne kopirovani), takze nasledny ostry /MIR uz nemaze nic.
+    # Stejne jmeno smazane vickrat za den -> v kosi zustava posledni verze.
+    # Vypis se cte pres /UNILOG (UTF-16 soubor), NE ze zachyceneho stdout -
+    # konzolove kodovani by zkomolilo diakritiku v cestach a polozka by kos
+    # minula (Test-Path na spatnou cestu selze a /MIR by ji smazal).
+    $listLog = Join-Path $env:TEMP "claude-backup-kos-$PID.log"
+    robocopy @($baseArgs + @('/L', '/NP', '/NJH', '/NJS', '/FP', "/UNILOG:$listLog")) | Out-Null
+    $listOut = @()
+    try { if (Test-Path -LiteralPath $listLog) { $listOut = Get-Content -LiteralPath $listLog -Encoding Unicode } } catch { }
+    try { Remove-Item -LiteralPath $listLog -Force -ErrorAction SilentlyContinue } catch { }
+    $moved = 0
+    foreach ($ln in $listOut) {
+        if ($ln -notmatch '\*EXTRA (File|Dir)') { continue }
+        $p = ($ln -split "`t")[-1].Trim().TrimEnd('\')
+        if (-not $p) { continue }
+        # bezpecnost: nikdy nesahat mimo cilovy strom mirroru
+        if (-not $p.StartsWith($target, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        if (-not (Test-Path -LiteralPath $p)) { continue }   # uz presunuto s nadrazenou slozkou
+        $rel  = $p.Substring($target.Length).TrimStart('\')
+        $dest = Join-Path $destRoot (Join-Path '_kos' (Join-Path $trashDate (Join-Path $name $rel)))
+        try {
+            $parent = Split-Path -Parent $dest
+            if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent -ErrorAction Stop | Out-Null }
+            if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue }
+            Move-Item -LiteralPath $p -Destination $dest -Force -ErrorAction Stop
+            $moved++
+        } catch {
+            # nepresunutou polozku smaze nasledny /MIR - zaloha bezi dal, jen
+            # tahle polozka kos mine (typicky zamceny soubor)
+            Log "kos  $name -> $destName  varovani: nepresunuto '$rel' ($($_.Exception.Message))"
+        }
+    }
+    if ($moved) { Log "kos  $name -> $destName  do kose presunuto polozek: $moved" }
+}
+
+function Invoke-Mirror($sourcePath, $name, $destRoot, $destName, $opts, $trashDays) {
     # Pozn.: dlouha vysledna cesta (>260, MAX_PATH) neni problem - mirror dela
     # robocopy, ktery je long-path-aware (overeno na 266 i 512 znacich).
     $target = Join-Path $destRoot $name
     # /MIR zrcadli (vc. mazani), /XJ preskoci junctiony (sdileny obsah),
     # /XF vylouci citlive soubory, /XD vylouci slozky (jen kdyz nejake jsou),
-    # /R:1 /W:1 kratke retry, zbytek tichy vystup. Vystup zahazujeme (mix kodovani
+    # /R:1 /W:1 kratke retry. Vystup ostreho behu zahazujeme (mix kodovani
     # robocopy vs PS by poskodil log) a hodnotime jen navratovy kod.
-    $roboArgs = @($sourcePath, $target, '/MIR', '/XJ')
-    if ($excludeFiles.Count) { $roboArgs += '/XF'; $roboArgs += $excludeFiles }
-    if ($excludeDirs.Count)  { $roboArgs += '/XD'; $roboArgs += $excludeDirs }
-    $roboArgs += @('/R:1', '/W:1')
-    if ($DryRun) { $roboArgs += @('/L', '/NP', '/NJH') }                    # jen vypis (vc. souboru a souhrnu)
-    else         { $roboArgs += @('/NP', '/NFL', '/NDL', '/NJH', '/NJS') }  # tichy vystup
-    if ($opts) { $roboArgs += @($opts) }
+    $baseArgs = @($sourcePath, $target, '/MIR', '/XJ')
+    if ($excludeFiles.Count) { $baseArgs += '/XF'; $baseArgs += $excludeFiles }
+    if ($excludeDirs.Count)  { $baseArgs += '/XD'; $baseArgs += $excludeDirs }
+    $baseArgs += @('/R:1', '/W:1')
+    if ($opts) { $baseArgs += @($opts) }
 
     if ($DryRun) {
         Log "dir  $name -> $destName  (dry-run /L):"
-        $out = robocopy @roboArgs
+        $out = robocopy @($baseArgs + @('/L', '/NP', '/NJH'))   # jen vypis (vc. souboru a souhrnu)
         $rc  = $LASTEXITCODE
         foreach ($ln in $out) { if ($ln -and $ln.Trim()) { Write-Host "      $ln" } }
+        if ($trashDays -ge 1) { Log "dir  $name -> $destName  (cil ma kos ${trashDays} dni: *EXTRA polozky by se presunuly do _kos, ne smazaly)" }
         Log "dir  $name -> $destName  (robocopy $rc)"
         return
     }
 
-    robocopy @roboArgs | Out-Null
+    # kos: polozky, ktere by /MIR smazal, nejdriv presunout do _kos
+    if ($trashDays -ge 1) { Move-ExtrasToTrash $baseArgs $target $destRoot $name $destName }
+
+    robocopy @($baseArgs + @('/NP', '/NFL', '/NDL', '/NJH', '/NJS')) | Out-Null
     $rc = $LASTEXITCODE
     if ($rc -ge 16) {
         $script:hadError = $true
@@ -280,18 +336,20 @@ foreach ($d in $destinations) {
         continue
     }
     $opts = @($d.robocopyOpts | Where-Object { $_ })
+    $trashDays = 0
+    if ($d.trash -and $d.trash.keepDays) { $trashDays = [int]$d.trash.keepDays }
     if ($DryRun) {
         # nic nevytvarime; dostupnost odhadneme podle existence disku
         $qualifier = try { Split-Path -Qualifier $root } catch { $null }
         if ($qualifier -and (Test-Path -LiteralPath "$qualifier\")) {
-            $ready += , ([pscustomobject]@{ Name = $d.name; Path = $root; Opts = $opts })
+            $ready += , ([pscustomobject]@{ Name = $d.name; Path = $root; Opts = $opts; TrashDays = $trashDays })
         } elseif ($d.optional) { $skipNotes += "cil  $($d.name)  preskoceno (nedostupny disk)" }
         else                   { $skipNotes += "cil  $($d.name)  NEDOSTUPNY (disk)"; $missingRequired += $d.name }
         continue
     }
     try {
         New-Item -ItemType Directory -Force -Path $root -ErrorAction Stop | Out-Null
-        $ready += , ([pscustomobject]@{ Name = $d.name; Path = $root; Opts = $opts })
+        $ready += , ([pscustomobject]@{ Name = $d.name; Path = $root; Opts = $opts; TrashDays = $trashDays })
     } catch {
         if ($d.optional) { $skipNotes += "cil  $($d.name)  preskoceno (nelze vytvorit: $($_.Exception.Message))" }
         else             { $skipNotes += "cil  $($d.name)  NEDOSTUPNY (nelze vytvorit: $($_.Exception.Message))"; $missingRequired += $d.name }
@@ -347,7 +405,7 @@ foreach ($d in $ready) {
                 $name = $_.Name
                 $rel  = Join-Path $slug $name
                 if ($_.PSIsContainer) {
-                    Invoke-Mirror $_.FullName $rel $d.Path $d.Name $d.Opts
+                    Invoke-Mirror $_.FullName $rel $d.Path $d.Name $d.Opts $d.TrashDays
                 }
                 elseif ($excludeFiles -contains $name) {
                     # citlivy soubor primo v korenu: preskocit a smazat starou kopii v cili
@@ -381,9 +439,32 @@ foreach ($d in $ready) {
             $p   = [Environment]::ExpandEnvironmentVariables($s.path)
             $sub = Get-SourceSlug $s
             if (Test-Path -LiteralPath $p -PathType Container) {
-                Invoke-Mirror $p $sub $d.Path $d.Name $d.Opts
+                Invoke-Mirror $p $sub $d.Path $d.Name $d.Opts $d.TrashDays
             } else {
                 Log "dir  $sub -> $($d.Name)  preskoceno (neexistuje)"
+            }
+        }
+    }
+}
+
+# --- kos: purge starych datovych slozek -------------------------------------
+# Jedine mazani mimo /MIR - striktne jen <cil>\_kos\<yyyy-MM-dd> starsi nez
+# keepDays daneho cile. Slozky s jinym nazvem se nechavaji byt.
+if (-not $DryRun) {
+    foreach ($d in $ready) {
+        if ($d.TrashDays -lt 1) { continue }
+        $kos = Join-Path $d.Path '_kos'
+        if (-not (Test-Path -LiteralPath $kos)) { continue }
+        $limit = [DateTime]::Today.AddDays(-$d.TrashDays)
+        foreach ($sub in @(Get-ChildItem -LiteralPath $kos -Directory -ErrorAction SilentlyContinue)) {
+            $dt = [DateTime]::MinValue
+            if ([DateTime]::TryParseExact($sub.Name, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$dt) -and ($dt -lt $limit)) {
+                try {
+                    Remove-Item -LiteralPath $sub.FullName -Recurse -Force -ErrorAction Stop
+                    Log "kos  $($d.Name)  smazana stara slozka kose: $($sub.Name)"
+                } catch {
+                    Log "kos  $($d.Name)  varovani: nejde smazat $($sub.Name) ($($_.Exception.Message))"
+                }
             }
         }
     }

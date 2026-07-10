@@ -94,6 +94,15 @@
                 "type": "array",
                 "items": { "type": "string", "pattern": "^/" },
                 "description": "Extra robocopy prepinace pro tento cil (fixni /MIR /XJ ... drzi engine)."
+              },
+              "trash": {
+                "type": "object",
+                "required": ["keepDays"],
+                "additionalProperties": false,
+                "description": "Kos na cili: polozky, ktere by /MIR smazal, se presunou do _kos\\<datum>\\<slug>\\<cesta> a drzi se keepDays dni. Nezadano = maze se natvrdo. Na OneDrive nechavej vypnuty (ma vlastni kos i verzovani).",
+                "properties": {
+                  "keepDays": { "type": "integer", "minimum": 1, "description": "Kolik dni drzet smazane polozky v _kos, nez je purge odstrani." }
+                }
               }
             }
           },
@@ -113,6 +122,15 @@
                 "type": "array",
                 "items": { "type": "string", "pattern": "^/" },
                 "description": "exFAT ma hrube casove razitka -> obvykle '/FFT'."
+              },
+              "trash": {
+                "type": "object",
+                "required": ["keepDays"],
+                "additionalProperties": false,
+                "description": "Kos na cili: polozky, ktere by /MIR smazal, se presunou do _kos\\<datum>\\<slug>\\<cesta> a drzi se keepDays dni. Nezadano = maze se natvrdo. Pro SSD cile doporuceno (nic jineho je nekryje).",
+                "properties": {
+                  "keepDays": { "type": "integer", "minimum": 1, "description": "Kolik dni drzet smazane polozky v _kos, nez je purge odstrani." }
+                }
               }
             }
           }

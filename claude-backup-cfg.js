@@ -162,6 +162,10 @@ function validateConfig(cfg) {
             if (!d.label) e.push(`destinations[${i}] (volumeLabel): chybi label`);
             if (!d.subPath) e.push(`destinations[${i}] (volumeLabel): chybi subPath`);
         } else e.push(`destinations[${i}]: neznamy type '${d.type}'`);
+        if (d.trash !== undefined) {
+            if (!d.trash || typeof d.trash !== 'object' || Array.isArray(d.trash)) e.push(`destinations[${i}]: trash musi byt objekt`);
+            else if (!Number.isInteger(d.trash.keepDays) || d.trash.keepDays < 1) e.push(`destinations[${i}]: trash.keepDays musi byt cele cislo >= 1`);
+        }
     });
     const primaries = dts.filter(d => d && d.primary === true);
     if (primaries.length !== 1) e.push(`musi byt prave jeden primarni cil (nalezeno ${primaries.length})`);
@@ -287,6 +291,7 @@ function destLabel(d) {
     const tags = [];
     if (d.primary) tags.push('primarni');
     if (d.optional) tags.push('volitelny');
+    if (d.trash && d.trash.keepDays) tags.push('kos=' + d.trash.keepDays + 'd');
     if (Array.isArray(d.robocopyOpts) && d.robocopyOpts.length) tags.push('opts=' + d.robocopyOpts.join(' '));
     return `${d.name}  ${loc}${tags.length ? '  [' + tags.join(', ') + ']' : ''}`;
 }
@@ -370,6 +375,12 @@ async function addDestination(cfg) {
     }
     const opts = csvToArr(await ask('  robocopy prepinace navic (napr. /FFT; prazdne = zadne): '));
     dest.robocopyOpts = opts;
+    const kosDny = (await ask('  kos - dny drzeni smazanych polozek (prazdne = bez kose): ')).trim();
+    if (kosDny) {
+        const m = parseInt(kosDny, 10);
+        if (Number.isInteger(m) && m >= 1 && String(m) === kosDny) dest.trash = { keepDays: m };
+        else console.log('  neplatne cislo - kos zustava vypnuty.');
+    }
     dest.optional = await askYesNo('  volitelny (nedostupny cil se preskoci bez chyby)?', t === 'volumeLabel');
     const makePrimary = await askYesNo('  primarni (je v nem log)?', cfg.destinations.every(d => !d.primary));
     if (makePrimary) { cfg.destinations.forEach(d => { d.primary = false; }); dest.primary = true; }
@@ -427,7 +438,7 @@ async function editDestination(cfg) {
     let changed = false;
     for (;;) {
         console.log('\n  cil ' + letter(idx) + ': ' + destLabel(d));
-        console.log('  [m] nazev   [p] primarni   [o] volitelny   [c] cesta   [r] robocopyOpts   [z] zpet');
+        console.log('  [m] nazev   [p] primarni   [o] volitelny   [c] cesta   [r] robocopyOpts   [k] kos   [z] zpet');
         const c = (await ask('  co upravit? ')).trim().toLowerCase();
         if (!c || c === 'z') return changed;
         if (c === 'm') {
@@ -467,6 +478,17 @@ async function editDestination(cfg) {
             const nr = (await ask('    robocopy prepinace (carkou; "-" = zadne; prazdne=nechat): ')).trim();
             if (nr === '-') { d.robocopyOpts = []; changed = true; console.log('    prepinace vymazany.'); }
             else if (nr) { d.robocopyOpts = csvToArr(nr); changed = true; console.log('    prepinace nastaveny.'); }
+        } else if (c === 'k') {
+            const cur = (d.trash && d.trash.keepDays) ? d.trash.keepDays : null;
+            console.log('    kos: ' + (cur ? cur + ' dni' : 'vypnuty') + '   (smazane polozky se drzi v <cil>\\_kos\\<datum>)');
+            if (d.name === 'OneDrive') console.log('    pozn.: OneDrive ma vlastni kos i verzovani - kos tu obvykle neni potreba.');
+            const a = (await ask("    dny drzeni ('-' = vypnout; prazdne = nechat): ")).trim();
+            if (a === '-') { delete d.trash; changed = true; console.log('    kos vypnut.'); }
+            else if (a) {
+                const m = parseInt(a, 10);
+                if (!Number.isInteger(m) || m < 1 || String(m) !== a) console.log('    neplatne cislo (cekam cele cislo >= 1).');
+                else { d.trash = { keepDays: m }; changed = true; console.log('    kos: ' + m + ' dni.'); }
+            }
         } else console.log('    neznamy prikaz.');
     }
 }
@@ -593,6 +615,7 @@ async function cleanupDestinations(cfg) {
         });
         const logFile = (cfg.log && cfg.log.file) ? cfg.log.file : '_backup.log';
         expected.add(logFile.toLowerCase());
+        expected.add('_kos');   // kos enginu (trash.keepDays) neni sirotek
         let entries;
         try { entries = fs.readdirSync(root); }
         catch (err) { console.log('    nelze cist (' + err.message + ') - preskoceno.'); continue; }

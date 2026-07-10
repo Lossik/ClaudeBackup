@@ -1,0 +1,240 @@
+# tests/run-tests.ps1 - kompletni sandbox testy (engine, editor, restore,
+# watchdog, deploy -WhatIf). Nic nesaha na realny config (~/.config) ani cile;
+# vse bezi v %TEMP%\cbtest (kratka cesta - slug koduje celou cestu zdroje a
+# dlouhy sandbox by prehnal cil pres MAX_PATH, limit Copy-Item v PS 5.1).
+#
+# Spusteni:  powershell -ExecutionPolicy Bypass -File tests\run-tests.ps1
+# Pozn.: test rate-limitu toastu zobrazi JEDEN skutecny toast (overuje, ze
+# druhy beh se stejnou chybou uz toast neopakuje).
+
+$ErrorActionPreference = 'Stop'
+$repo     = Split-Path -Parent $PSScriptRoot
+$S        = Join-Path $env:TEMP 'cbtest'
+$engine   = Join-Path $repo 'claude-backup.ps1'
+$editor   = Join-Path $repo 'claude-backup-cfg.js'
+$restore  = Join-Path $repo 'claude-restore.ps1'
+$watchdog = Join-Path $repo 'claude-backup-watchdog.ps1'
+$deploy   = Join-Path $repo 'deploy.ps1'
+$node     = Join-Path $env:USERPROFILE '.local\nodejs\node.exe'
+$fail = 0
+
+function Check($name, $cond) {
+    if ($cond) { Write-Host "PASS  $name" }
+    else { Write-Host "FAIL  $name"; $script:fail++ }
+}
+function WriteJson($path, $obj) {
+    # bez BOM (PS5.1 -Encoding utf8 pise BOM a JSON.parse v Node ho odmita)
+    [IO.File]::WriteAllText($path, ($obj | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false))
+}
+function Slug($p) {
+    # ocekavany slug (stejny algoritmus jako engine/editor)
+    $t = $p.Trim().TrimEnd('\', '/'); $t = $t -replace '%', ''
+    $t = $t -replace '[\\/:]+', '_'; $t = $t -replace '[*?"<>|]', '_'
+    return $t.Trim('_').TrimEnd('.', ' ')
+}
+
+Remove-Item -Recurse -Force $S -ErrorAction SilentlyContinue
+
+# ============================ 0) syntaxe =====================================
+foreach ($f in @($engine, $restore, $watchdog, $deploy)) {
+    $errs = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$null, [ref]$errs) | Out-Null
+    Check "0. parser bez chyb: $(Split-Path -Leaf $f)" ($errs.Count -eq 0)
+}
+$hasNode = Test-Path -LiteralPath $node
+if ($hasNode) {
+    & $node --check $editor
+    Check '0. editor: syntaxe ok (node --check)' ($LASTEXITCODE -eq 0)
+} else {
+    Write-Host "SKIP  editor testy (portable node nenalezen: $node)"
+}
+
+# ============================ A) engine: slug layout =========================
+New-Item -ItemType Directory -Force -Path "$S\globbase\.claude", "$S\srcA", "$S\dest1" | Out-Null
+Set-Content "$S\globbase\.claude\settings.json" '{"a":1}'
+Set-Content "$S\globbase\.claude.json" '{}'
+Set-Content "$S\globbase\.credentials.json" 'SECRET'
+Set-Content "$S\srcA\file.txt" 'hello'
+
+$cfg = [ordered]@{
+    version = 1
+    sources = @(
+        [ordered]@{ type = 'glob'; base = "$S\globbase"; pattern = '.c*' },
+        [ordered]@{ type = 'dir';  path = "$S\srcA" }
+    )
+    excludeFiles = @('.credentials.json')
+    destinations = @([ordered]@{ name = 'T1'; type = 'path'; path = "$S\dest1"; primary = $true })
+}
+$cfgPath = "$S\config.json"
+WriteJson $cfgPath $cfg
+$slugGlob = Slug "$S\globbase"
+$slugDir  = Slug "$S\srcA"
+
+$out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $cfgPath -DryRun -NoNotify 2>&1 | Out-String
+Check 'A1. dry-run: exit 0' ($LASTEXITCODE -eq 0)
+Check 'A1. dry-run: vypis obsahuje slug globu' ($out -match [regex]::Escape("$slugGlob\.claude"))
+Check 'A1. dry-run: nic se nevytvorilo v cili' (-not (Get-ChildItem "$S\dest1" -ErrorAction SilentlyContinue))
+
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $cfgPath -NoNotify | Out-Null
+Check 'A2. beh: exit 0' ($LASTEXITCODE -eq 0)
+Check 'A2. beh: glob dir ve slug slozce' (Test-Path "$S\dest1\$slugGlob\.claude\settings.json")
+Check 'A2. beh: glob soubor ve slug slozce' (Test-Path "$S\dest1\$slugGlob\.claude.json")
+Check 'A2. beh: dir zdroj ve slug slozce' (Test-Path "$S\dest1\$slugDir\file.txt")
+Check 'A2. beh: .credentials.json NENI v cili' (-not (Get-ChildItem "$S\dest1" -Recurse -Filter '.credentials.json'))
+Check 'A2. beh: _backup.log v primarnim cili' (Test-Path "$S\dest1\_backup.log")
+
+Set-Content "$S\dest1\$slugGlob\.credentials.json" 'OLDSECRET'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $cfgPath -NoNotify | Out-Null
+Check 'A3. 2. beh: exit 0 (idempotentni)' ($LASTEXITCODE -eq 0)
+Check 'A3. 2. beh: stara citliva kopie smazana' (-not (Test-Path "$S\dest1\$slugGlob\.credentials.json"))
+
+$bad = [ordered]@{
+    version = 1
+    sources = @(
+        [ordered]@{ type = 'dir'; path = 'C:\a\b' },
+        [ordered]@{ type = 'dir'; path = 'C:\a_b' }
+    )
+    excludeFiles = @('.credentials.json')
+    destinations = @([ordered]@{ name = 'T1'; type = 'path'; path = "$S\destBad"; primary = $true })
+}
+$badPath = "$S\config-bad.json"
+WriteJson $badPath $bad
+$out4 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $badPath -NoNotify 2>&1 | Out-String
+Check 'A4. kolize slugu: exit 3' ($LASTEXITCODE -eq 3)
+Check 'A4. kolize slugu: hlaska jmenuje slug' ($out4 -match "kolize slugu 'C_a_b'")
+Check 'A4. kolize slugu: cil nevytvoren (zadny robocopy)' (-not (Test-Path "$S\destBad"))
+
+# ============================ B) editor ======================================
+if ($hasNode) {
+    $out5 = "q`n" | & $node $editor --config $cfgPath 2>&1 | Out-String
+    Check 'B1. render ukazuje slug zdroje' ($out5 -match [regex]::Escape("->  $slugDir\"))
+
+    $out6 = "u`nq`n" | & $node $editor --config $badPath 2>&1 | Out-String
+    Check 'B2. kolizni config nejde ulozit' ($out6 -match 'NELZE ULOZIT' -and $out6 -match "kolize slugu 'C_a_b'")
+
+    New-Item -ItemType Directory -Force -Path "$S\dest1\.claude", "$S\dest1\.local\bin" | Out-Null
+    Set-Content "$S\dest1\sirotek.txt" 'x'
+    $out7 = "k`na`nq`n" | & $node $editor --config $cfgPath 2>&1 | Out-String
+    Check 'B3. uklid: vypsal sirotky' ($out7 -match [regex]::Escape("$S\dest1\.claude") -and $out7 -match 'sirotek\.txt')
+    Check 'B3. uklid: sirotci smazani' (-not (Test-Path "$S\dest1\.claude") -and -not (Test-Path "$S\dest1\sirotek.txt"))
+    Check 'B3. uklid: slug slozky a log zustaly' ((Test-Path "$S\dest1\$slugGlob") -and (Test-Path "$S\dest1\_backup.log"))
+
+    Set-Content "$S\dest1\sirotek2.txt" 'x'
+    $out8 = "k`nn`nq`n" | & $node $editor --config $cfgPath 2>&1 | Out-String
+    Check 'B4. uklid: bez potvrzeni ponechano' ((Test-Path "$S\dest1\sirotek2.txt") -and $out8 -match 'ponechano')
+    Remove-Item "$S\dest1\sirotek2.txt" -Force
+
+    $out9 = "t`nq`n" | & $node $editor --config $cfgPath 2>&1 | Out-String
+    Check 'B5. dry-run pres editor [t]' ($out9 -match 'navratovy kod enginu: 0')
+}
+
+# ============================ C) restore =====================================
+$R = "$S\restore"
+New-Item -ItemType Directory -Force -Path "$R\live\globbase\.claude", "$R\live\srcA\sub", "$R\live\cfgdir", "$R\dest1" | Out-Null
+Set-Content "$R\live\globbase\.claude\settings.json" 'SET1'
+Set-Content "$R\live\globbase\.claude.json" 'CJ1'
+Set-Content "$R\live\srcA\file.txt" 'F1'
+Set-Content "$R\live\srcA\sub\deep.txt" 'D1'
+$rcfg = [ordered]@{
+    version = 1
+    sources = @(
+        [ordered]@{ type = 'glob'; base = "$R\live\globbase"; pattern = '.claude*' },
+        [ordered]@{ type = 'dir';  path = "$R\live\srcA" },
+        [ordered]@{ type = 'dir';  path = "$R\live\cfgdir" }
+    )
+    excludeFiles = @('.credentials.json')
+    destinations = @([ordered]@{ name = 'T1'; type = 'path'; path = "$R\dest1"; primary = $true })
+}
+$rcfgPath = "$R\live\cfgdir\config.json"   # config uvnitr zdroje -> je i v zaloze
+WriteJson $rcfgPath $rcfg
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $rcfgPath -NoNotify | Out-Null
+Check 'C0. setup: zaloha probehla' ($LASTEXITCODE -eq 0)
+$rSlugGlob = Slug "$R\live\globbase"
+$rSlugA    = Slug "$R\live\srcA"
+
+Remove-Item "$R\live\srcA\file.txt" -Force
+$outC1 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $restore -ConfigPath $rcfgPath -DryRun 2>&1 | Out-String
+Check 'C1. dry-run: exit 0, nic neobnovil' (($LASTEXITCODE -eq 0) -and -not (Test-Path "$R\live\srcA\file.txt"))
+
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $restore -ConfigPath $rcfgPath *> $null
+Check 'C2. bez -Yes neinteraktivne: exit 4, nic nezapsal' (($LASTEXITCODE -eq 4) -and -not (Test-Path "$R\live\srcA\file.txt"))
+
+Set-Content "$R\live\srcA\extra.txt" 'EXTRA'
+Set-Content "$R\live\globbase\.claude\novy.txt" 'NEW'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $restore -ConfigPath $rcfgPath -Yes | Out-Null
+Check 'C3. obnova: smazany soubor vracen, extra prezil' ((Test-Path "$R\live\srcA\file.txt") -and (Test-Path "$R\live\srcA\extra.txt") -and (Test-Path "$R\live\globbase\.claude\novy.txt"))
+
+Remove-Item "$R\live\srcA\file.txt", "$R\live\globbase\.claude.json" -Force
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $restore -ConfigPath $rcfgPath -Yes -Only $rSlugA | Out-Null
+Check 'C4. -Only: vybrany obnoven, ostatni ne' ((Test-Path "$R\live\srcA\file.txt") -and -not (Test-Path "$R\live\globbase\.claude.json"))
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $restore -ConfigPath $rcfgPath -Yes -Only 'NEEXISTUJE' *> $null
+Check 'C4. -Only neznamy: exit 1' ($LASTEXITCODE -eq 1)
+
+Set-Content "$R\live\globbase\mimo-glob.txt" 'LIVE'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $restore -ConfigPath $rcfgPath -Yes -Mirror | Out-Null
+Check 'C5. mirror: maze uvnitr stromu' ((-not (Test-Path "$R\live\srcA\extra.txt")) -and -not (Test-Path "$R\live\globbase\.claude\novy.txt"))
+Check 'C5. mirror: base glob zdroje NEZRCADLENA' (Test-Path "$R\live\globbase\mimo-glob.txt")
+Check 'C5. mirror: obsah vracen' ((Test-Path "$R\live\globbase\.claude.json") -and (Test-Path "$R\live\srcA\file.txt"))
+
+Set-Content "$R\dest1\$rSlugGlob\.credentials.json" 'BADTOKEN'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $restore -ConfigPath $rcfgPath -Yes -Mirror | Out-Null
+Check 'C6. podvrzeny .credentials.json se neobnovi' (-not (Test-Path "$R\live\globbase\.credentials.json"))
+Remove-Item "$R\dest1\$rSlugGlob\.credentials.json" -Force
+
+Remove-Item -Recurse -Force "$R\live"
+$outC7 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $restore -FromBackup "$R\dest1" -Yes 2>&1 | Out-String
+Check 'C7. -FromBackup: config ze zalohy, vse obnoveno' (($LASTEXITCODE -eq 0) -and ($outC7 -match 'config nalezen v zaloze') -and (Test-Path "$R\live\srcA\sub\deep.txt") -and (Test-Path "$R\live\cfgdir\config.json"))
+
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $restore -FromBackup "$R\neexistuje" -Yes *> $null
+Check 'C8. nedostupna zaloha: exit 2' ($LASTEXITCODE -eq 2)
+
+# ============================ D) rate-limit toastu ===========================
+# Vlastni config dir, at _notify.json nikam nezasahuje. Prvni chybny beh
+# zobrazi JEDEN skutecny toast; druhy uz musi byt potlaceny (stejny duvod).
+$D = "$S\notify"
+New-Item -ItemType Directory -Force -Path $D | Out-Null
+$dbad = [ordered]@{ version = 1; sources = @(); excludeFiles = @('.credentials.json'); destinations = @() }
+WriteJson "$D\config.json" $dbad
+Write-Host '      (ted se zobrazi 1 testovaci toast "chyba configu")'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath "$D\config.json" *> $null
+Check 'D1. chybny beh: exit 3 + _notify.json vznikl' (($LASTEXITCODE -eq 3) -and (Test-Path "$D\_notify.json"))
+$stamp1 = (Get-Content "$D\_notify.json" -Raw | ConvertFrom-Json).lastToast
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath "$D\config.json" *> $null
+$stamp2 = (Get-Content "$D\_notify.json" -Raw | ConvertFrom-Json).lastToast
+Check 'D2. stejna chyba znovu: toast potlacen (timestamp beze zmeny)' ($stamp1 -eq $stamp2)
+# uspesny beh (validni config) stav maze -> dalsi chyba by toastovala hned
+New-Item -ItemType Directory -Force -Path "$D\src", "$D\dst" | Out-Null
+Set-Content "$D\src\f.txt" 'x'
+$dok = [ordered]@{
+    version = 1
+    sources = @([ordered]@{ type = 'dir'; path = "$D\src" })
+    excludeFiles = @('.credentials.json')
+    destinations = @([ordered]@{ name = 'T'; type = 'path'; path = "$D\dst"; primary = $true })
+}
+WriteJson "$D\config.json" $dok
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath "$D\config.json" *> $null
+Check 'D3. uspesny beh: exit 0 + _notify.json smazan' (($LASTEXITCODE -eq 0) -and -not (Test-Path "$D\_notify.json"))
+
+# ============================ E) watchdog ====================================
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $watchdog -TaskName 'CbTestNeexistujiciUloha' -NoNotify *> $null
+Check 'E1. neexistujici uloha: exit 1' ($LASTEXITCODE -eq 1)
+if (Get-ScheduledTask -TaskName 'ClaudeBackup' -ErrorAction SilentlyContinue) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $watchdog -TaskName 'ClaudeBackup' -MaxAgeMinutes 525600 -NoNotify *> $null
+    Check 'E2. zdrava uloha: exit 0' ($LASTEXITCODE -eq 0)
+} else {
+    Write-Host 'SKIP  E2. uloha ClaudeBackup na tomto stroji neexistuje'
+}
+
+# ============================ F) deploy -WhatIf ==============================
+$outF = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $deploy -WhatIf -CreateTask 2>&1 | Out-String
+Check 'F1. deploy -WhatIf -CreateTask: exit 0, nic nemeni' (($LASTEXITCODE -eq 0) -and ($outF -match 'WHATIF'))
+
+# ============================ vysledek =======================================
+Write-Host ''
+if ($fail -eq 0) {
+    Write-Host '=== VSECHNY TESTY PROSLY ==='
+    Remove-Item -Recurse -Force $S -ErrorAction SilentlyContinue
+} else {
+    Write-Host "=== SELHALO: $fail (sandbox ponechan: $S) ==="
+}
+exit $fail

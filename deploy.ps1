@@ -9,15 +9,18 @@
 # rollback: deploy.ps1 -Rollback.
 #
 # Pouziti:
-#   deploy.ps1            ostre nasazeni
-#   deploy.ps1 -WhatIf    jen ukaze, co by udelal (nic nemeni)
-#   deploy.ps1 -Rollback  obnovi predchozi (legacy) engine ze zalohy
-#
-# Vytvoreni samotne naplanovane ulohy je mimo deploy (uloha uz existuje).
+#   deploy.ps1              ostre nasazeni
+#   deploy.ps1 -WhatIf      jen ukaze, co by udelal (nic nemeni)
+#   deploy.ps1 -Rollback    obnovi predchozi (legacy) engine ze zalohy
+#   deploy.ps1 -CreateTask  navic vytvori chybejici naplanovane ulohy:
+#                           ClaudeBackup (logon + repetice dle configu, default
+#                           10 min) a ClaudeBackupWatchdog (logon +30 min,
+#                           pak co 12 h). Existujici ulohy nemeni.
 
 param(
     [switch]$WhatIf,
-    [switch]$Rollback
+    [switch]$Rollback,
+    [switch]$CreateTask
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,14 +32,16 @@ $configPath = Join-Path $configDir 'config.json'
 $nodeExe    = Join-Path $env:USERPROFILE '.local\nodejs\node.exe'
 $repoDir    = $PSScriptRoot
 
-$engineSrc  = Join-Path $repoDir 'claude-backup.ps1'
-$editorSrc  = Join-Path $repoDir 'claude-backup-cfg.js'
-$restoreSrc = Join-Path $repoDir 'claude-restore.ps1'
-$schemaSrc  = Join-Path $repoDir 'config.schema.json'
+$engineSrc   = Join-Path $repoDir 'claude-backup.ps1'
+$editorSrc   = Join-Path $repoDir 'claude-backup-cfg.js'
+$restoreSrc  = Join-Path $repoDir 'claude-restore.ps1'
+$watchdogSrc = Join-Path $repoDir 'claude-backup-watchdog.ps1'
+$schemaSrc   = Join-Path $repoDir 'config.schema.json'
 
-$engineDst  = Join-Path $binDir 'claude-backup.ps1'
-$editorDst  = Join-Path $binDir 'claude-backup-cfg.js'
-$restoreDst = Join-Path $binDir 'claude-restore.ps1'
+$engineDst   = Join-Path $binDir 'claude-backup.ps1'
+$editorDst   = Join-Path $binDir 'claude-backup-cfg.js'
+$restoreDst  = Join-Path $binDir 'claude-restore.ps1'
+$watchdogDst = Join-Path $binDir 'claude-backup-watchdog.ps1'
 $cmdDst    = Join-Path $binDir 'claude-backup-cfg.cmd'
 $vbsDst    = Join-Path $binDir 'claude-backup-hidden.vbs'
 $schemaDst = Join-Path $configDir 'config.schema.json'
@@ -59,7 +64,7 @@ Write-Host "=== ClaudeBackup deploy $(if ($WhatIf) { '(WHATIF - nic se nemeni)' 
 
 # --- prerekvizity ----------------------------------------------------------
 if (-not (Test-Path -LiteralPath $nodeExe)) { throw "portable node nenalezen: $nodeExe" }
-foreach ($f in @($engineSrc, $editorSrc, $restoreSrc, $schemaSrc)) {
+foreach ($f in @($engineSrc, $editorSrc, $restoreSrc, $watchdogSrc, $schemaSrc)) {
     if (-not (Test-Path -LiteralPath $f)) { throw "chybi zdrojovy soubor: $f" }
 }
 
@@ -82,6 +87,8 @@ Step "nasazeni editoru -> $editorDst" { Copy-Item -LiteralPath $editorSrc -Desti
 # 3b) restore script (dostane se i do zalohy - .local\bin je zdroj, takze
 #     obnova na novem stroji ma restore k dispozici primo v zaloze)
 Step "nasazeni restore -> $restoreDst" { Copy-Item -LiteralPath $restoreSrc -Destination $restoreDst -Force }
+# 3c) watchdog (hlida, ze uloha zalohy vubec bezi; ulohu vytvari -CreateTask)
+Step "nasazeni watchdogu -> $watchdogDst" { Copy-Item -LiteralPath $watchdogSrc -Destination $watchdogDst -Force }
 # 4) cmd wrapper (vola portable node absolutni cestou; %* propaguje argumenty)
 $cmdContent = "@echo off`r`n`"$nodeExe`" `"$editorDst`" %*`r`n"
 Step "zapis wrapperu -> $cmdDst" { Set-Content -LiteralPath $cmdDst -Value $cmdContent -Encoding ascii -NoNewline }
@@ -102,6 +109,47 @@ WScript.Quit rc
     Write-Host "  VBS wrapper uz existuje (nechavam beze zmeny): $vbsDst"
 }
 
+# --- vytvoreni naplanovanych uloh (-CreateTask) -----------------------------
+# Bezne nasazeni ulohy nemeni; -CreateTask vytvori CHYBEJICI ulohy (existujici
+# necha byt - jejich upravy resi editor [i] a interval-sync nize). Bez admina:
+# ulohy se registruji pod aktualnim uzivatelem (RunLevel Limited).
+if ($CreateTask) {
+    $cfgTask = $null
+    try { if (Test-Path -LiteralPath $configPath) { $cfgTask = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json } } catch { }
+    $iv = 10
+    if ($cfgTask -and $cfgTask.schedule -and $cfgTask.schedule.intervalMinutes) { $iv = [int]$cfgTask.schedule.intervalMinutes }
+    $backupTaskName = 'ClaudeBackup'
+    if ($cfgTask -and $cfgTask.schedule -and $cfgTask.schedule.taskName) { $backupTaskName = $cfgTask.schedule.taskName }
+
+    if (Get-ScheduledTask -TaskName $backupTaskName -ErrorAction SilentlyContinue) {
+        Write-Host "  uloha '$backupTaskName' uz existuje (nechavam beze zmeny)"
+    } else {
+        Step "vytvoreni ulohy '$backupTaskName' (po prihlaseni + kazdych $iv min)" {
+            $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+            $rep = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $iv) -RepetitionDuration ([TimeSpan]::MaxValue)).Repetition
+            $tr  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+            $tr.Repetition = $rep
+            $act = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$vbsDst`""
+            Register-ScheduledTask -TaskName $backupTaskName -Action $act -Trigger $tr -Settings $settings | Out-Null
+        }
+    }
+
+    $wdTaskName = 'ClaudeBackupWatchdog'
+    if (Get-ScheduledTask -TaskName $wdTaskName -ErrorAction SilentlyContinue) {
+        Write-Host "  uloha '$wdTaskName' uz existuje (nechavam beze zmeny)"
+    } else {
+        Step "vytvoreni ulohy '$wdTaskName' (po prihlaseni +30 min, pak co 12 h)" {
+            $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+            $rep = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 12) -RepetitionDuration ([TimeSpan]::MaxValue)).Repetition
+            $tr  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+            $tr.Delay = 'PT30M'
+            $tr.Repetition = $rep
+            $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy RemoteSigned -File `"$watchdogDst`""
+            Register-ScheduledTask -TaskName $wdTaskName -Action $act -Trigger $tr -Settings $settings | Out-Null
+        }
+    }
+}
+
 # --- interval ulohy dle configu -------------------------------------------
 if (Test-Path -LiteralPath $configPath) {
     try {
@@ -118,7 +166,7 @@ if (Test-Path -LiteralPath $configPath) {
                     if ($ok) { Set-ScheduledTask -TaskName $taskName -Trigger $t.Triggers | Out-Null }
                 }
             } else {
-                Write-Host "  uloha '$taskName' nenalezena - interval neaplikovan (vytvoreni ulohy je mimo deploy)."
+                Write-Host "  uloha '$taskName' nenalezena - interval neaplikovan (vytvor ji: deploy.ps1 -CreateTask)."
             }
         }
     } catch { Write-Host "  interval neaplikovan: $($_.Exception.Message)" }

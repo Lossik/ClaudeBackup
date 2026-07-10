@@ -25,6 +25,9 @@
 #
 # Pri selhani (exit 1/2/3) engine zobrazi Windows notifikaci (NotifyIcon toast),
 # pokud to config nezakazuje (notify.onError:false), neni -NoNotify ani -DryRun.
+# Trvajici STEJNA chyba (beh co 10 min) se opakuje az po notify.repeatMinutes
+# (vychozi 360); jina chyba se oznami hned. Stav v _notify.json vedle configu,
+# uspesny beh ho maze.
 
 param(
     [string]$ConfigPath = (Join-Path $env:USERPROFILE '.config\claude-backup\config.json'),
@@ -70,10 +73,30 @@ function Write-BootLog($m) {
     Write-Host $line
 }
 
+# --- rate-limit toastu -------------------------------------------------------
+# Trvajici stejna chyba by jinak toastovala pri kazdem behu (co 10 min).
+# Stejny 'reason' se proto oznami znovu az po $notifyRepeatMin minutach;
+# jiny reason hned. Stav v _notify.json vedle configu; uspesny beh ho maze,
+# takze prvni toast po zotaveni prijde vzdy okamzite.
+$notifyRepeatMin = 360   # zpresni se z notify.repeatMinutes po nacteni configu
+$notifyStateFile = Join-Path $configDir '_notify.json'
+
+function Show-ErrorNotification($reason, $title, $text) {
+    if ($DryRun -or -not $notifyOnError) { return }
+    try {
+        if (Test-Path -LiteralPath $notifyStateFile) {
+            $st = Get-Content -LiteralPath $notifyStateFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if (($st.reason -eq $reason) -and $st.lastToast -and (([DateTime]::Now - [DateTime]::Parse($st.lastToast)).TotalMinutes -lt $notifyRepeatMin)) { return }
+        }
+    } catch { }
+    Show-Notification $title $text
+    try { (@{ reason = $reason; lastToast = [DateTime]::Now.ToString('o') } | ConvertTo-Json -Compress) | Set-Content -LiteralPath $notifyStateFile -Encoding utf8 } catch { }
+}
+
 function Stop-BadConfig($msg) {
     Write-BootLog "CONFIG CHYBA: $msg"
     Write-BootLog "=== backup NESPUSTEN (exit 3) ==="
-    if ($notifyOnError) { Show-Notification 'ClaudeBackup - chyba configu' "Zaloha nebezela: $msg" }
+    Show-ErrorNotification 'exit3' 'ClaudeBackup - chyba configu' "Zaloha nebezela: $msg"
     exit 3
 }
 
@@ -90,6 +113,7 @@ try {
 
 # notify preference z configu (jen zpresnuje default; -NoNotify/-DryRun ma prednost)
 if ($cfg.notify -and ($cfg.notify.onError -eq $false)) { $notifyOnError = $false }
+if ($cfg.notify -and $cfg.notify.repeatMinutes) { $notifyRepeatMin = [int]$cfg.notify.repeatMinutes }
 
 # --- validace --------------------------------------------------------------
 # Schema tohle hlida taky, ale engine si to overi znovu: obrana pred spustenim
@@ -276,7 +300,7 @@ foreach ($d in $destinations) {
 if ($ready.Count -eq 0) {
     Write-BootLog "zadny cil neni dostupny (exit 2)"
     foreach ($n in $skipNotes) { Write-BootLog $n }
-    if ($notifyOnError) { Show-Notification 'ClaudeBackup - zadny cil' 'Zadny cil zalohy neni dostupny (OneDrive i SSD).' }
+    Show-ErrorNotification 'exit2' 'ClaudeBackup - zadny cil' 'Zadny cil zalohy neni dostupny (OneDrive i SSD).'
     exit 2
 }
 
@@ -371,8 +395,10 @@ if ($hadError -or $missingRequired.Count) {
     if ($hadError)              { $reasons += "chyba kopirovani (viz _backup.log)" }
     $why = $reasons -join '; '
     Log "=== backup done S CHYBAMI ($why) ==="
-    if ($notifyOnError) { Show-Notification 'ClaudeBackup - chyba' "$why." }
+    Show-ErrorNotification 'exit1' 'ClaudeBackup - chyba' "$why."
     exit 1
 }
 Log "=== backup done ok ==="
+# uspech resetuje rate-limit toastu - dalsi (nova) chyba se oznami hned
+if (-not $DryRun) { try { Remove-Item -LiteralPath $notifyStateFile -Force -ErrorAction SilentlyContinue } catch { } }
 exit 0

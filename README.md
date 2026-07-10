@@ -12,8 +12,10 @@ a externí SSD — řízené config souborem místo editace scriptu.
 | `claude-backup.ps1` | PowerShell | backup engine (`robocopy /MIR`), čte config |
 | `claude-backup-cfg` | Node.js | interaktivní CLI pro úpravu configu (bez závislostí) |
 | `claude-restore.ps1` | PowerShell | obnova zálohy zpět na původní cesty (config-driven) |
+| `claude-backup-watchdog.ps1` | PowerShell | hlídá, že se záloha vůbec spouští (druhá úloha) |
 | `config.schema.json` | JSON Schema | sdílená validace configu (engine i editor) |
-| `deploy.ps1` | PowerShell | nasazení do `~/.local/bin` + přepnutí úlohy |
+| `deploy.ps1` | PowerShell | nasazení do `~/.local/bin`, `-CreateTask` vytvoří úlohy |
+| `tests/run-tests.ps1` | PowerShell | kompletní sandbox testy (nic nesahá na reálný config/cíle) |
 
 Config žije v `%USERPROFILE%\.config\claude-backup\config.json` — mimo repo, jsou
 to data uživatele, ne kód.
@@ -35,10 +37,11 @@ Jednorázově (např. na novém stroji):
 2. **Vytvořit config** — spusť `claude-backup-cfg`; když config neexistuje,
    nabídne vygenerovat výchozí (odpovídá původnímu zadrátovanému nastavení),
    pak `u` (uložit).
-3. **Nasadit** — `deploy.ps1` (zkopíruje engine + editor do `~/.local/bin`,
-   schéma vedle configu).
-4. **Naplánovaná úloha `ClaudeBackup`** musí existovat (spouští ji VBS wrapper).
-   Její *vytvoření* je mimo deploy — deploy jen přepíná engine a srovnává interval.
+3. **Nasadit** — `deploy.ps1 -CreateTask` (zkopíruje scripty do `~/.local/bin`,
+   schéma vedle configu a vytvoří chybějící naplánované úlohy: `ClaudeBackup`
+   po přihlášení + každých 10 min a `ClaudeBackupWatchdog` po přihlášení
+   +30 min, pak co 12 h). Bez `-CreateTask` deploy existující úlohy jen
+   aktualizuje (engine, interval) a nové nevytváří.
 
 Pořadí je důležité: engine bez configu končí exit 3, takže **config musí být první**.
 
@@ -58,7 +61,7 @@ Ukáže přehled (zdroje, cíle, výjimky, notifikace, interval) a menu příkaz
 | `c` / `x` / `ep` | přidat / odebrat / **upravit** cíl (pevná cesta, nebo disk podle jmenovky svazku) |
 | `f` / `d` | **výjimky** souborů / složek (`+jmeno` přidá, `-jmeno` odebere, prázdné = zpět) |
 | `k` | **úklid cílů** — vypíše a po potvrzení smaže z kořene cíle vše, co nepatří žádnému zdroji (starý layout, složky po odebraných zdrojích) |
-| `n` | **notifikace** při chybě zap/vyp (Windows toast) |
+| `n` | **notifikace** při chybě zap/vyp (Windows toast) + interval opakování toastu při trvající chybě |
 | `i` | **interval** úlohy — změní minuty a nabídne aplikovat rovnou na živou úlohu |
 | `t` | **test (dry-run)** — `robocopy /L`, ukáže co by se zálohovalo, **nic nezapíše** |
 | `s` | **stav** — konec `_backup.log` + `LastTaskResult` úlohy |
@@ -106,13 +109,35 @@ Každý cíl je buď **volitelný** (`optional: true`), nebo **povinný** (bez `
 - **Volitelný** — nedostupný cíl (typicky odpojený externí SSD) engine **tiše
   přeskočí** (exit 0). Pro disk, který nebývá připojený pořád.
 - **Povinný** — nedostupný cíl → engine **pošle toast a skončí exit 1** (i když
-  ostatní cíle vyšly), a to při **každém běhu** (co 10 min), dokud cíl chybí.
+  ostatní cíle vyšly). Exit 1 se opakuje při každém běhu, dokud cíl chybí;
+  **toast** se ale při trvající stejné chybě opakuje až po `notify.repeatMinutes`
+  (výchozí 360, tj. 6 h — jiná chyba přijde hned, úspěšný běh počítadlo resetuje).
   Pro cíl, který má být vždy dostupný — dozvíš se, když vypadne.
 
 Když jsou nedostupné **všechny** cíle, engine skončí exit 2.
 
 Pozn.: zdroj s `onlyDestinations` (např. velká složka jen na SSD) se při
 odpojeném disku **nezálohuje nikam** — má kopii jen na tom jednom cíli.
+
+## Hlídání, že záloha vůbec běží (watchdog)
+
+Engine ohlásí **selhání svého běhu**, ale ne situaci, kdy se **vůbec nespouští**
+(zakázaná/smazaná úloha, rozbitý trigger). Od toho je druhá úloha
+`ClaudeBackupWatchdog` (`claude-backup-watchdog.ps1`, vytvoří ji
+`deploy.ps1 -CreateTask`): po přihlášení +30 min a pak každých 12 h zkontroluje,
+že úloha zálohy existuje, není zakázaná a běžela nedávno (výchozí limit 60 min).
+Problém → toast + řádek do `_engine.log` vedle configu. Výsledky *selhání* běhů
+neřeší — ty toastuje engine sám.
+
+## Testy
+
+```
+powershell -ExecutionPolicy Bypass -File tests\run-tests.ps1
+```
+
+Kompletní sandbox suita (engine, editor, restore, watchdog, deploy `-WhatIf`) —
+běží v `%TEMP%\cbtest`, na reálný config ani cíle nesahá. Jediný viditelný
+vedlejší efekt: jeden testovací toast (ověření rate-limitu notifikací).
 
 ## Nasazení / rollback
 

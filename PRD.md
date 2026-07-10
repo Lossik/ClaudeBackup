@@ -1,6 +1,6 @@
 # PRD: ClaudeBackup 2.0 — zálohování řízené configem
 
-**Stav:** ✅ hotovo — fáze 1–4 implementovány, ověřeny a **nasazeny** (naplánovaná úloha běží na novém config-driven enginu). Navíc: Windows notifikace při selhání, editace intervalu úlohy.
+**Stav:** ✅ hotovo — fáze 1–4 implementovány, ověřeny a **nasazeny** (naplánovaná úloha běží na novém config-driven enginu). Navíc: Windows notifikace při selhání (s rate-limitem), editace intervalu úlohy, slug layout cílů (§ 5.3), restore (§ 5.7), watchdog (§ 5.8), testy v repu (§ 5.9), `deploy -CreateTask`.
 **Datum:** 2026-07-07
 **Repo:** github.com/Lossik/ClaudeBackup
 
@@ -43,9 +43,12 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
 - Verzování / retence záloh (robocopy `/MIR` zůstává — poslední stav, ne historie).
 - Šifrování, komprese, cloud API (S3 apod.).
 - GUI aplikace / web UI — začínáme CLI, GUI případně později.
-- Plná správa naplánované úlohy (vytvoření, přidávání/odebírání triggerů) —
-  mimo **interval opakování**, který editor nově umí měnit (viz § 8). Struktura
-  triggerů (logon + repetice) i akce zůstávají.
+- Plná správa naplánované úlohy (přidávání/odebírání triggerů) — mimo
+  **interval opakování** (mění editor, viz § 8) a **vytvoření chybějících
+  úloh** (`deploy.ps1 -CreateTask`, doplněno 2026-07-10). Struktura triggerů
+  (logon + repetice) i akce zůstávají.
+- Retence / snapshoty proti „smazal jsem to omylem" — vědomě odloženo
+  (k rozmyšlení; OneDrive to částečně kryje košem a verzováním, SSD nekryje nic).
 
 ## 5. Návrh řešení
 
@@ -146,6 +149,9 @@ Klíčové vlastnosti:
   Nezadáno = na všechny cíle.
 - **`notify`** (volitelné) — `onError` zapíná Windows toast při selhání zálohy
   (exit 1/2/3). Když blok chybí, notifikace jsou zapnuté (ekvivalent `true`).
+  `repeatMinutes` (výchozí 360): při **trvající stejné chybě** (běh co ~10 min)
+  se toast opakuje až po tolika minutách — jiná chyba se oznámí hned, úspěšný
+  běh stav resetuje (`_notify.json` vedle configu).
 - **`schedule`** (volitelné) — `intervalMinutes` = interval opakování zálohy,
   `taskName` = jméno úlohy. Editor (`[i]`) ho mění a umí ho aplikovat rovnou na
   živou úlohu. Engine `schedule` ignoruje (je to stav plánovače, ne obsah zálohy).
@@ -244,6 +250,27 @@ zpět na cestu zdroje — žádná inverze slugu, mapování se vždy odvozuje z
 - Návratové kódy: 0 ok / 1 chyba kopírování či nenalezený `-Only` /
   2 kořen zálohy nedostupný / 3 config / 4 neodsouhlaseno.
 
+### 5.8 Watchdog — hlídání, že záloha vůbec běží (doplněno 2026-07-10)
+
+Engine oznámí selhání svého běhu, ale nikdy situaci, kdy se **vůbec nespouští**
+(zakázaná/smazaná úloha, rozbitý trigger) — to bylo slepé místo. Řeší druhá
+úloha `ClaudeBackupWatchdog` → `claude-backup-watchdog.ps1` (po přihlášení
++30 min, pak co 12 h; vytváří `deploy.ps1 -CreateTask`): zkontroluje, že úloha
+zálohy existuje, není `Disabled` a běžela nedávno (`-MaxAgeMinutes`, výchozí
+60 — záloha běží co ~10 min a watchdog startuje až 30 min po přihlášení, takže
+zdravý stav má vždy čerstvý `LastRunTime`). Problém → toast + řádek do
+`_engine.log`; exit 1. Výsledky *selhání* běhů neřeší (toastuje engine sám,
+s rate-limitem). „Ok" se do logu nepíše (bez rotace by rostl donekonečna).
+
+### 5.9 Testy (doplněno 2026-07-10)
+
+`tests/run-tests.ps1` — kompletní sandbox suita (engine/slug layout, editor
+vč. úklidu, restore vč. `-Mirror` a `-FromBackup`, rate-limit toastů, watchdog,
+`deploy -WhatIf -CreateTask`). Běží v `%TEMP%\cbtest` (krátká cesta kvůli
+MAX_PATH), na reálný config ani cíle nesahá; bez závislostí (PowerShell +
+portable node; bez node se editorové testy přeskočí). Jediný viditelný vedlejší
+efekt: jeden testovací toast při ověření rate-limitu.
+
 ## 6. Fáze
 
 | Fáze | Obsah | Výstup | Stav |
@@ -296,5 +323,9 @@ zpět na cestu zdroje — žádná inverze slugu, mapování se vždy odvozuje z
 - **~~Otevřená otázka:~~ notifikace při selhání zálohy (toast)** — ✅ vyřešeno:
   engine při exit 1/2/3 zobrazí Windows toast (`NotifyIcon`, bez závislostí,
   best-effort). Řízeno `notify.onError` (default zap i bez bloku), potlačeno
-  v `-DryRun`/`-NoNotify`, přepínatelné v editoru (`[n]`). Pozn.: zatím bez
-  omezení frekvence — při trvalé chybě toast každých 10 min (lze doplnit stav).
+  v `-DryRun`/`-NoNotify`, přepínatelné v editoru (`[n]`).
+- **~~Toast bez omezení frekvence~~** — ✅ vyřešeno (2026-07-10): trvající
+  stejná chyba se opakuje až po `notify.repeatMinutes` (výchozí 360; jiná
+  chyba hned, úspěch resetuje). Stav v `_notify.json` vedle configu.
+- **~~Záloha se tiše nespouští~~** — ✅ vyřešeno (2026-07-10): watchdog úloha
+  (viz § 5.8) hlídá existenci, povolenost a čerstvost běhu úlohy zálohy.

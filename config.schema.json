@@ -19,12 +19,12 @@
     "sources": {
       "type": "array",
       "minItems": 1,
-      "description": "Zdroje k zalohovani. Zrcadli se na vsechny cile, pokud nemaji 'onlyDestinations'. Prazdne pole je ZAKAZANE (viz /MIR maze).",
+      "description": "Zdroje k zalohovani. Kazdy zdroj se zalohuje do vlastni 'slug' slozky v koreni cile (slug se odvozuje z nerozvinuteho korene zdroje: dir 'path' / glob 'base', napr. %USERPROFILE%\\.local\\bin -> USERPROFILE_.local_bin), takze si zdroje nikdy nesahaji do stejneho podstromu. Ruzne koreny nesmi dat stejny slug - hlida engine (exit 3) i editor, schema to vyjadrit neumi. Zrcadli se na vsechny cile, pokud nemaji 'onlyDestinations'. Prazdne pole je ZAKAZANE (viz /MIR maze).",
       "items": {
         "oneOf": [
           {
             "type": "object",
-            "description": "Glob: rozvine se na vic polozek v 'base' podle 'pattern'. Slozky se zrcadli robocopy /MIR, jednotlive soubory se kopiruji.",
+            "description": "Glob: rozvine se na vic polozek v 'base' podle 'pattern'. Slozky se zrcadli robocopy /MIR do <cil>\\<slug base>\\<jmeno>, jednotlive soubory se kopiruji tamtez.",
             "required": ["type", "base", "pattern"],
             "additionalProperties": false,
             "properties": {
@@ -40,7 +40,7 @@
           },
           {
             "type": "object",
-            "description": "Konkretni slozka (zrcadli se robocopy /MIR).",
+            "description": "Konkretni slozka (zrcadli se robocopy /MIR do <cil>\\<slug path>).",
             "required": ["type", "path"],
             "additionalProperties": false,
             "properties": {

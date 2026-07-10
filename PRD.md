@@ -122,9 +122,14 @@ Klíčové vlastnosti:
 
 - **`sources`** — dva typy: `glob` (dnešní `.claude*`) a `dir` (konkrétní
   složka), do budoucna snadno rozšiřitelné. Proměnné prostředí (`%...%`)
-  se expandují za běhu. Podsložka v cíli se u zdroje pod profilem odvozuje
-  relativně k `%USERPROFILE%` (`.local\bin` → `<cíl>\.local\bin`, 1:1 s legacy),
-  jinak z názvu složky.
+  se expandují za běhu. **Každý zdroj má v cíli vlastní „slug" složku**
+  odvozenou z nerozvinutého kořene zdroje (`dir` → `path`, `glob` → `base`):
+  `%USERPROFILE%\.local\bin` → `<cíl>\USERPROFILE_.local_bin`, položky globu
+  jdou do `<cíl>\<slug base>\<jméno>`. Dva zdroje si tak nikdy nesahají do
+  stejného podstromu a `/MIR` jednoho nemůže smazat data druhého — kolize
+  cílových podcest jsou vyloučené konstrukčně, ne detekcí za běhu.
+  (Nahrazuje původní mapování relativně k profilu / dle názvu složky, které
+  kolize umožňovalo; změněno 2026-07-10, viz § 5.6 migrace.)
 - **`excludeFiles`** → robocopy `/XF`; **`excludeDirs`** → robocopy `/XD`
   (přidáno jako protějšek k souborům). `.credentials.json` v `excludeFiles`
   je povinné (vynucuje schéma i engine). `excludeDirs` je volitelné, smí být
@@ -151,7 +156,10 @@ Klíčové vlastnosti:
 - Engine config **znovu validuje** (nezávisle na schématu — obrana před
   spuštěním `/MIR` nad rozbitým configem): neprázdné `sources` i `destinations`,
   přítomnost `.credentials.json` v `excludeFiles`, právě jeden `primary` cíl,
-  platný `type` u zdrojů/cílů a `onlyDestinations` odkazující na existující cíl.
+  platný `type` u zdrojů/cílů, `onlyDestinations` odkazující na existující cíl
+  a **unikátnost slugů**: různé kořeny zdrojů nesmí dát stejný slug (zapisovaly
+  by do stejné složky cíle); stejný kořen smí slug sdílet (zápisy idempotentní).
+  Kontrola je statická — nepotřebuje glob expanzi ani přístup na disk.
 - Config chybí / nejde parsovat / neprojde validací → **exit 3** (nový kód).
   Diagnostika jde do `_engine.log` **vedle configu** (reálný `_backup.log`
   v cíli ještě neznáme, případně je cíl nedostupný); Plánovač chybu ukáže
@@ -177,7 +185,8 @@ Zdroje:                        Cíle:
 Výjimky: soubory: .credentials.json  |  složky: node_modules, tmp, …
 
 [p] přidat zdroj   [o] odebrat zdroj   [c] přidat cíl   [x] odebrat cíl
-[v] výjimky        [t] test (dry-run)  [s] stav poslední zálohy   [q] konec
+[v] výjimky        [k] úklid cílů      [t] test (dry-run)
+[s] stav poslední zálohy   [q] konec
 ```
 
 - **Přidání zdroje/cíle** = průvodce (cesta s validací existence, u cíle
@@ -185,6 +194,11 @@ Výjimky: soubory: .credentials.json  |  složky: node_modules, tmp, …
 - **Test (dry-run)** — spustí engine s `robocopy /L` (nic nekopíruje),
   ukáže, co by se zálohovalo. Klíčové pro důvěru po změně configu.
 - **Stav** — přečte konec `_backup.log` + LastTaskResult úlohy.
+- **Úklid cílů (`[k]`)** — v kořeni cíle smí být jen slug složky zdrojů a log;
+  vše ostatní (typicky starý layout před slug schématem, nebo složky po
+  odebraném zdroji — `/MIR` po sobě neuklízí) vypíše a po potvrzení smaže.
+  Jediná destruktivní akce editoru: vždy interaktivní, s výpisem plných cest
+  předem, výchozí odpověď „ne".
 - Spouštění: `claude-backup-cfg.cmd` v `~/.local/bin` (wrapper volající
   portable node absolutní cestou).
 
@@ -194,6 +208,14 @@ Při prvním běhu editoru (config neexistuje) se vygeneruje výchozí config
 odpovídající dnešnímu zadrátovanému nastavení. Engine bez configu spadne
 s exit 3 — nasazení tedy proběhne v pořadí: (1) vygenerovat config,
 (2) nasadit nový engine, (3) ověřit ručním spuštěním úlohy.
+
+**Migrace na slug layout (2026-07-10):** přechod na slug schéma mění cesty
+všech záloh v cíli (jednorázově se znovu nahraje celý objem — pozor na
+OneDrive kvótu, dokud existují stará i nová kopie zároveň). Postup:
+(1) `deploy.ps1`, (2) nechat proběhnout zálohu (vzniknou slug složky),
+(3) `claude-backup-cfg` → `[k]` smaže staré složky. Když je kvóta těsná,
+lze `[k]` spustit už před první zálohou v novém layoutu — starý layout smaže
+jako sirotky (za cenu okamžiku bez hotové zálohy v cíli).
 
 Nasazení automatizuje **`deploy.ps1`**: zálohuje legacy engine (`.bak`), zkopíruje
 `claude-backup.ps1` + `claude-backup-cfg.js` (+ `.cmd` wrapper volající portable
@@ -213,8 +235,11 @@ node) do `~/.local/bin`, nasadí schéma vedle configu, srovná interval úlohy 
 
 ## 7. Akceptační kritéria
 
-1. Po nasazení fáze 1 proběhne záloha se stejným výsledkem jako dnes
-   (stejné složky na obou cílech, log bez chyb).
+1. ~~Po nasazení fáze 1 proběhne záloha se stejným výsledkem jako dnes
+   (stejné složky na obou cílech, log bez chyb).~~ Splněno při přechodu na
+   config-driven engine; od 2026-07-10 vědomě opuštěno — layout cíle se změnil
+   na slug schéma (viz § 5.3), aby dva zdroje nemohly kolidovat ve stejné
+   podsložce cíle. Obsah zálohy (co se zálohuje a co ne) zůstává stejný.
 2. Přidání nového zdroje přes CLI se projeví v příští záloze bez editace kódu.
 3. Odpojený volitelný cíl (SSD) zálohu neshodí (exit 0, poznámka v logu).
 4. Poškozený config → exit 3, srozumitelná hláška v logu, žádné mazání
@@ -227,6 +252,13 @@ node) do `~/.local/bin`, nasadí schéma vedle configu, srovná interval úlohy 
   smazat obsah cíle. Mitigace: validace (schéma i engine) odmítne prázdné
   `sources`/`destinations` → exit 3 před robocopy. **Implementováno a ověřeno**
   v sandboxu (kritérium 4).
+- **~~Kolize cílových podcest~~** — ✅ vyřešeno slug schématem (2026-07-10):
+  původní mapování (leaf name / cesta relativní k profilu, glob položky přímo
+  v kořeni cíle) dovolovalo dvěma zdrojům zapisovat do téže podsložky cíle,
+  kde by se `/MIR` běhy vzájemně mazaly (a glob soubory tiše přepisovaly).
+  Nyní má každý zdroj vlastní slug složku; jediná zbylá kolize (různé kořeny →
+  stejný slug po sanitizaci) je statická chyba configu (engine exit 3, editor
+  odmítne uložit).
 - **~~Délka cílové cesty (MAX_PATH)~~** — ✅ vyřešeno: `robocopy /MIR` je
   long-path-aware, mirror zvládá cílové cesty i výrazně přes 260 znaků
   (ověřeno: 266 i 512 znaků → exit 0, soubor reálně zkopírován). Engine nemá

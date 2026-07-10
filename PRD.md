@@ -1,6 +1,6 @@
 # PRD: ClaudeBackup 2.0 — zálohování řízené configem
 
-**Stav:** ✅ hotovo — fáze 1–4 implementovány, ověřeny a **nasazeny** (naplánovaná úloha běží na novém config-driven enginu). Navíc: Windows notifikace při selhání (s rate-limitem), editace intervalu úlohy, slug layout cílů (§ 5.3), restore (§ 5.7), watchdog (§ 5.8), testy v repu (§ 5.9), `deploy -CreateTask`.
+**Stav:** ✅ hotovo — fáze 1–4 implementovány, ověřeny a **nasazeny** (naplánovaná úloha běží na novém config-driven enginu). Navíc: Windows notifikace při selhání (s rate-limitem), editace intervalu úlohy, slug layout cílů (§ 5.3), restore (§ 5.7), watchdog (§ 5.8), testy v repu (§ 5.9), koš na smazané (§ 5.10), `deploy -CreateTask`.
 **Datum:** 2026-07-07
 **Repo:** github.com/Lossik/ClaudeBackup
 
@@ -47,8 +47,11 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
   **interval opakování** (mění editor, viz § 8) a **vytvoření chybějících
   úloh** (`deploy.ps1 -CreateTask`, doplněno 2026-07-10). Struktura triggerů
   (logon + repetice) i akce zůstávají.
-- Retence / snapshoty proti „smazal jsem to omylem" — vědomě odloženo
-  (k rozmyšlení; OneDrive to částečně kryje košem a verzováním, SSD nekryje nic).
+- ~~Retence / snapshoty proti „smazal jsem to omylem"~~ — **koš na smazané**
+  implementován 2026-07-10 (per cíl, viz § 5.10). Ne-cílem zůstává **verzování
+  přepsaných** souborů (obdoba OneDrive version history): záloha běží co
+  10 min a živě se měnící soubory by koš zaplavily; na OneDrive to řeší
+  OneDrive sám.
 
 ## 5. Návrh řešení
 
@@ -112,7 +115,8 @@ a pro jeho úpravy vznikne jednoduché, lidské rozhraní.
       "label": "BACKUP_SSD",
       "subPath": "Backups\\claude",
       "robocopyOpts": ["/FFT"],
-      "optional": true
+      "optional": true,
+      "trash": { "keepDays": 30 }
     }
   ],
   "log": { "file": "_backup.log", "maxSizeKB": 1024, "keepLines": 300 },
@@ -143,6 +147,7 @@ Klíčové vlastnosti:
   vs. `type: "volumeLabel"` (najdi disk podle jmenovky — písmeno se mění).
   `optional: true` = nedostupný cíl se přeskočí bez chyby (dnešní chování SSD).
   Právě jeden cíl musí mít `primary: true` (je v něm log) — hlídá engine.
+  `trash.keepDays` = koš na cíli (viz § 5.10).
 - **`onlyDestinations`** (na úrovni zdroje) — náhrada původního
   `destinationFilters` / `$extraDirsSsdOnly`: zdroj se zálohuje jen na
   vyjmenované cíle (velké složky jen na SSD, OneDrive má 5 GB limit).
@@ -270,6 +275,29 @@ vč. úklidu, restore vč. `-Mirror` a `-FromBackup`, rate-limit toastů, watchd
 MAX_PATH), na reálný config ani cíle nesahá; bez závislostí (PowerShell +
 portable node; bez node se editorové testy přeskočí). Jediný viditelný vedlejší
 efekt: jeden testovací toast při ověření rate-limitu.
+
+### 5.10 Koš — retence smazaných souborů (doplněno 2026-07-10)
+
+`/MIR` je zrcadlo: soubor smazaný ve zdroji zmizí do 10 minut i ze zálohy.
+Cíl se zapnutým košem (`trash: { keepDays: N }`) proto maže přes koš:
+
+1. **Pre-pass** `robocopy /MIR /L` se stejnými argumenty jako ostrý mirror —
+   řádky `*EXTRA File/Dir` (tagy anglické i na CZ Windows) říkají, co by
+   `/MIR` smazal. Výpis se čte přes `/UNILOG` (UTF-16 soubor), **ne** ze
+   zachyceného stdout — konzolové kódování by zkomolilo diakritiku v cestách
+   a položka by koš minula (ověřeno testem).
+2. **Přesun** extras do `<cíl>\_kos\<yyyy-MM-dd>\<slug>\<relativní cesta>` —
+   rename na stejném svazku (žádné kopírování, funguje na exFAT). Ostrý
+   `/MIR` pak už nemaže nic. Nepřesunutelná položka (zamčený soubor) se
+   zaloguje a smaže ji `/MIR` — degradace, ne pád zálohy.
+3. **Purge** po záloze: složky `_kos\<datum>` starší než `keepDays` se smažou.
+   Jediné mazání mimo `/MIR` — striktně jen datované složky uvnitř `_kos`.
+
+Zásady: koš jen na **smazané**, ne přepsané (viz § 4 ne-cíle);
+`.credentials.json` do koše nikdy (`/XF` platí i pro pre-pass — zůstává mimo
+úvahu robocopy); `_kos` je na whitelistu úklidu `[k]`; OneDrive koš nemá
+(vlastní koš + verzování, 5GB kvóta), SSD cíle ano (doporučeno 30 dní).
+Editor: `[ep]` → `k` (nastavit/vypnout), průvodce `[c]` se ptá při přidání cíle.
 
 ## 6. Fáze
 

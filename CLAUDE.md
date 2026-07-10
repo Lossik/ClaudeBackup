@@ -79,6 +79,11 @@ nejde parsovat / nesedí schéma. Plánovač je ukazuje v `LastTaskResult`.
   `BACKUP_SSD` — nastav na svou), písmeno disku se mění. Volitelný: nepřipojený =
   přeskoč bez chyby. exFAT má hrubá časová razítka → robocopy `/FFT`, jinak by
   kopíroval vše pořád dokola.
+- **Koš** (`trash.keepDays`, per cíl): co by `/MIR` smazal, jde do
+  `<cíl>\_kos\<datum>\...` a po keepDays dnech to smaže purge. Detekce mazaných
+  přes pre-pass `/MIR /L` + `/UNILOG` (UTF-16 — NIKDY nečíst robocopy výstup ze
+  stdout, konzolové kódování komolí diakritiku v cestách). Na OneDrive koš
+  nezapínat (má vlastní + 5GB kvóta). `.credentials.json` do koše nikdy.
 
 ## Spouštění (produkce)
 

@@ -229,6 +229,79 @@ if (Get-ScheduledTask -TaskName 'ClaudeBackup' -ErrorAction SilentlyContinue) {
 $outF = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $deploy -WhatIf -CreateTask 2>&1 | Out-String
 Check 'F1. deploy -WhatIf -CreateTask: exit 0, nic nemeni' (($LASTEXITCODE -eq 0) -and ($outF -match 'WHATIF'))
 
+# ============================ G) kos (trash.keepDays) ========================
+$K = "$S\kos"
+New-Item -ItemType Directory -Force -Path "$K\src\sub", "$K\dst1", "$K\dst2" | Out-Null
+Set-Content "$K\src\a.txt" 'A'
+Set-Content "$K\src\sub\b.txt" 'B'
+# diakritika ve jmene souboru (roundtrip pres parsovani vystupu robocopy)
+$diaName = 'zlu' + [char]0x0165 + 'ou' + [char]0x010D + 'k' + [char]0x00FD + '.txt'
+Set-Content "$K\src\$diaName" 'DIA'
+$kcfg = [ordered]@{
+    version = 1
+    sources = @([ordered]@{ type = 'dir'; path = "$K\src" })
+    excludeFiles = @('.credentials.json')
+    destinations = @(
+        [ordered]@{ name = 'T1'; type = 'path'; path = "$K\dst1"; primary = $true; trash = [ordered]@{ keepDays = 5 } },
+        [ordered]@{ name = 'T2'; type = 'path'; path = "$K\dst2" }
+    )
+}
+$kcfgPath = "$K\config.json"
+WriteJson $kcfgPath $kcfg
+$kslug = Slug "$K\src"
+$today = [DateTime]::Now.ToString('yyyy-MM-dd')
+
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $kcfgPath -NoNotify | Out-Null
+Check 'G1. prvni beh: exit 0, zadny _kos (nic se nemazalo)' (($LASTEXITCODE -eq 0) -and -not (Test-Path "$K\dst1\_kos"))
+
+# smazat soubor, podstrom i soubor s diakritikou -> na cili s kosem do _kos, bez kose natvrdo
+Remove-Item "$K\src\a.txt", "$K\src\$diaName" -Force
+Remove-Item -Recurse -Force "$K\src\sub"
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $kcfgPath -NoNotify | Out-Null
+Check 'G2. beh: exit 0' ($LASTEXITCODE -eq 0)
+$kosBase = "$K\dst1\_kos\$today\$kslug"
+Check 'G2. kos: smazany soubor presunut' ((Test-Path "$kosBase\a.txt") -and ((Get-Content "$kosBase\a.txt" -Raw) -match 'A'))
+Check 'G2. kos: smazany podstrom presunut' (Test-Path "$kosBase\sub\b.txt")
+Check 'G2. kos: diakritika ve jmene prezila' (Test-Path "$kosBase\$diaName")
+Check 'G2. kos: polozky zmizely ze slug stromu' (-not (Test-Path "$K\dst1\$kslug\a.txt") -and -not (Test-Path "$K\dst1\$kslug\sub"))
+Check 'G2. cil bez kose: smazano natvrdo, zadny _kos' ((-not (Test-Path "$K\dst2\_kos")) -and -not (Test-Path "$K\dst2\$kslug\a.txt"))
+
+# purge: stara datovana slozka zmizi, dnesni i ne-datumove nazvy zustanou
+New-Item -ItemType Directory -Force -Path "$K\dst1\_kos\2020-01-01" | Out-Null
+Set-Content "$K\dst1\_kos\2020-01-01\stare.txt" 'x'
+New-Item -ItemType Directory -Force -Path "$K\dst1\_kos\necum" | Out-Null
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $kcfgPath -NoNotify | Out-Null
+Check 'G3. purge: stara slozka smazana' (-not (Test-Path "$K\dst1\_kos\2020-01-01"))
+Check 'G3. purge: dnesni slozka a ne-datumovy nazev zustaly' ((Test-Path "$kosBase\a.txt") -and (Test-Path "$K\dst1\_kos\necum"))
+
+# .credentials.json v cili se do kose NIKDY nedostane (/XF plati i pro pre-pass)
+Set-Content "$K\dst1\$kslug\.credentials.json" 'BAD'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $kcfgPath -NoNotify | Out-Null
+Check 'G4. citlivy soubor neni v kosi' (-not (Get-ChildItem "$K\dst1\_kos" -Recurse -Filter '.credentials.json'))
+Remove-Item "$K\dst1\$kslug\.credentials.json" -Force
+
+# neplatny keepDays -> exit 3
+$kcfg.destinations[0].trash.keepDays = 0
+WriteJson $kcfgPath $kcfg
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $kcfgPath -NoNotify *> $null
+Check 'G5. neplatny keepDays: exit 3' ($LASTEXITCODE -eq 3)
+$kcfg.destinations[0].trash.keepDays = 5
+WriteJson $kcfgPath $kcfg
+
+if ($hasNode) {
+    # editor: uklid [k] necha _kos; [ep]->[k] nastavi kos; validace odmitne keepDays<1
+    Set-Content "$K\dst1\sirotek.txt" 'x'
+    $outG = "k`na`nn`nq`n" | & $node $editor --config $kcfgPath 2>&1 | Out-String
+    Check 'G6. uklid: _kos neni sirotek' ((Test-Path "$K\dst1\_kos") -and -not (Test-Path "$K\dst1\sirotek.txt"))
+    $outG7 = "ep`nB`nk`n30`nz`nq`na`n" | & $node $editor --config $kcfgPath 2>&1 | Out-String
+    Check 'G7. editor [ep][k]: nastavi kos (render kos=30d)' ($outG7 -match 'kos: 30 dni' -and $outG7 -match 'kos=30d')
+    $kbad = "$K\config-badtrash.json"
+    $kcfg2 = [ordered]@{ version = 1; sources = $kcfg.sources; excludeFiles = @('.credentials.json'); destinations = @([ordered]@{ name = 'T1'; type = 'path'; path = "$K\dst1"; primary = $true; trash = [ordered]@{ keepDays = 0 } }) }
+    WriteJson $kbad $kcfg2
+    $outG8 = "u`nq`n" | & $node $editor --config $kbad 2>&1 | Out-String
+    Check 'G8. editor: keepDays<1 nejde ulozit' ($outG8 -match 'NELZE ULOZIT' -and $outG8 -match 'keepDays')
+}
+
 # ============================ vysledek =======================================
 Write-Host ''
 if ($fail -eq 0) {

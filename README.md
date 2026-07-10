@@ -58,7 +58,7 @@ Ukáže přehled (zdroje, cíle, výjimky, notifikace, interval) a menu příkaz
 | Klávesa | Akce |
 |---|---|
 | `p` / `o` / `ec` | přidat / odebrat / **upravit** zdroj (`glob` nebo `dir`; lze omezit na konkrétní cíle) |
-| `c` / `x` / `ep` | přidat / odebrat / **upravit** cíl (pevná cesta, nebo disk podle jmenovky svazku) |
+| `c` / `x` / `ep` | přidat / odebrat / **upravit** cíl (pevná cesta / jmenovka svazku; v `ep` i **koš** — dny držení smazaných) |
 | `f` / `d` | **výjimky** souborů / složek (`+jmeno` přidá, `-jmeno` odebere, prázdné = zpět) |
 | `k` | **úklid cílů** — vypíše a po potvrzení smaže z kořene cíle vše, co nepatří žádnému zdroji (starý layout, složky po odebraných zdrojích) |
 | `n` | **notifikace** při chybě zap/vyp (Windows toast) + interval opakování toastu při trvající chybě |
@@ -207,7 +207,26 @@ které slug vznikl (např. `…\Backups\claude\USERPROFILE\.claude` zpět do
 `%USERPROFILE%\.claude`).
 
 ⚠️ `/MIR` je **zrcadlo, ne archiv** — když v profilu soubor smažeš, při dalším
-běhu zmizí i ze zálohy. Není to ochrana proti „smazal jsem to omylem minulý týden".
+běhu zmizí i ze zálohy. Proti „smazal jsem to omylem minulý týden" chrání **koš**
+(viz níže), pokud ho má cíl zapnutý.
+
+## Koš — ochrana proti omylem smazaným souborům
+
+Cíl se zapnutým košem (`trash.keepDays`, nastavíš přes `ep` → `k`) **nemaže
+natvrdo**: položky, které by `/MIR` smazal, se přesunou do
+`<cíl>\_kos\<datum>\<slug>\<cesta>` a drží se tam `keepDays` dní (pak je
+purge při běžné záloze odstraní). Přesun je rename na stejném svazku — nic se
+nekopíruje, funguje i na exFAT.
+
+- **SSD cíle: zapni** (doporučeno ~30 dní) — smazané soubory jinak nekryje nic.
+- **OneDrive: nech vypnutý** — má vlastní koš (30 dní) i verzování souborů
+  a `_kos` by ukusoval z ~5GB kvóty.
+- **Obnova z koše:** struktura je lidsky čitelná — najdi
+  `_kos\<datum>\<slug>\…` a zkopíruj zpět (ručně, nebo po obnově slug složky
+  scriptem `claude-restore.ps1`).
+- Koš chrání jen **smazané** soubory, ne přepsané (verzování obsahu koš
+  nedělá — na OneDrive ho řeší OneDrive sám).
+- `.credentials.json` se do koše nikdy nedostane (výjimky platí i pro koš).
 
 ## Návratové kódy enginu
 

@@ -11,6 +11,7 @@ a externí SSD — řízené config souborem místo editace scriptu.
 |---|---|---|
 | `claude-backup.ps1` | PowerShell | backup engine (`robocopy /MIR`), čte config |
 | `claude-backup-cfg` | Node.js | interaktivní CLI pro úpravu configu (bez závislostí) |
+| `claude-restore.ps1` | PowerShell | obnova zálohy zpět na původní cesty (config-driven) |
 | `config.schema.json` | JSON Schema | sdílená validace configu (engine i editor) |
 | `deploy.ps1` | PowerShell | nasazení do `~/.local/bin` + přepnutí úlohy |
 
@@ -149,8 +150,36 @@ v configu: `%USERPROFILE%\.local\bin` → `USERPROFILE_.local_bin`, položky glo
 zdroje (`.claude*`) leží v `USERPROFILE\.claude…`. Díky tomu si dva zdroje
 nikdy nesahají do stejné složky cíle (`/MIR` jednoho nemůže mazat data druhého).
 
-Obnova = zkopírovat obsah slug složky zpět na cestu, ze které slug vznikl
-(např. `…\Backups\claude\USERPROFILE\.claude` zpět do `%USERPROFILE%\.claude`).
+### Obnova scriptem (`claude-restore.ps1`)
+
+Restore čte config, spočítá slugy stejně jako engine a kopíruje slug složky
+zpět na původní cesty — nemusíš nic mapovat ručně:
+
+```
+claude-restore.ps1 -DryRun               # jen ukáže co→kam, nic nezapíše
+claude-restore.ps1                       # obnova všeho z primárního cíle (ptá se před zápisem)
+claude-restore.ps1 -From extSSD          # obnova z jiného cíle z configu
+claude-restore.ps1 -Only USERPROFILE_Claude,2   # jen vybrané zdroje (slug nebo pořadí)
+claude-restore.ps1 -FromBackup "E:\Backups\claude"   # nový stroj: koren zálohy přímo,
+                                         # config si najde v záloze (je soběstačná)
+```
+
+**Bezpečnostní sémantika:** default **nemaže** — jen doplní/přepíše soubory ze
+zálohy (`robocopy /E`). `-Mirror` udělá přesné zrcadlo (smaže, co v záloze
+není), ale jen **uvnitř obnovovaných stromů** — u glob zdrojů se zrcadlí každá
+položka zvlášť, base složka (typicky celý `%USERPROFILE%`) se nikdy nezrcadlí.
+Bez `-Yes` se před zápisem ptá; `.credentials.json` se **nikdy neobnovuje**
+(po obnově `.claude` se do Claude přihlas znovu).
+
+**Nový stroj (disaster recovery):** záloha obsahuje i config a scripty
+(`USERPROFILE_.config_claude-backup`, `USERPROFILE_.local_bin` — je v ní
+i `claude-restore.ps1`). Postup: spusť restore přímo ze zálohy s `-FromBackup`,
+pak `deploy.ps1` z obnoveného repa/`.local\bin` a ručně vytvoř naplánovanou
+úlohu (její vytvoření je mimo deploy).
+
+Ruční obnova bez scriptu = zkopírovat obsah slug složky zpět na cestu, ze
+které slug vznikl (např. `…\Backups\claude\USERPROFILE\.claude` zpět do
+`%USERPROFILE%\.claude`).
 
 ⚠️ `/MIR` je **zrcadlo, ne archiv** — když v profilu soubor smažeš, při dalším
 běhu zmizí i ze zálohy. Není to ochrana proti „smazal jsem to omylem minulý týden".

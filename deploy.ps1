@@ -29,12 +29,14 @@ $configPath = Join-Path $configDir 'config.json'
 $nodeExe    = Join-Path $env:USERPROFILE '.local\nodejs\node.exe'
 $repoDir    = $PSScriptRoot
 
-$engineSrc = Join-Path $repoDir 'claude-backup.ps1'
-$editorSrc = Join-Path $repoDir 'claude-backup-cfg.js'
-$schemaSrc = Join-Path $repoDir 'config.schema.json'
+$engineSrc  = Join-Path $repoDir 'claude-backup.ps1'
+$editorSrc  = Join-Path $repoDir 'claude-backup-cfg.js'
+$restoreSrc = Join-Path $repoDir 'claude-restore.ps1'
+$schemaSrc  = Join-Path $repoDir 'config.schema.json'
 
-$engineDst = Join-Path $binDir 'claude-backup.ps1'
-$editorDst = Join-Path $binDir 'claude-backup-cfg.js'
+$engineDst  = Join-Path $binDir 'claude-backup.ps1'
+$editorDst  = Join-Path $binDir 'claude-backup-cfg.js'
+$restoreDst = Join-Path $binDir 'claude-restore.ps1'
 $cmdDst    = Join-Path $binDir 'claude-backup-cfg.cmd'
 $vbsDst    = Join-Path $binDir 'claude-backup-hidden.vbs'
 $schemaDst = Join-Path $configDir 'config.schema.json'
@@ -57,7 +59,7 @@ Write-Host "=== ClaudeBackup deploy $(if ($WhatIf) { '(WHATIF - nic se nemeni)' 
 
 # --- prerekvizity ----------------------------------------------------------
 if (-not (Test-Path -LiteralPath $nodeExe)) { throw "portable node nenalezen: $nodeExe" }
-foreach ($f in @($engineSrc, $editorSrc, $schemaSrc)) {
+foreach ($f in @($engineSrc, $editorSrc, $restoreSrc, $schemaSrc)) {
     if (-not (Test-Path -LiteralPath $f)) { throw "chybi zdrojovy soubor: $f" }
 }
 
@@ -77,6 +79,9 @@ if ((Test-Path -LiteralPath $engineDst) -and -not (Test-Path -LiteralPath $engin
 Step "nasazeni enginu -> $engineDst" { Copy-Item -LiteralPath $engineSrc -Destination $engineDst -Force }
 # 3) editor (.js)
 Step "nasazeni editoru -> $editorDst" { Copy-Item -LiteralPath $editorSrc -Destination $editorDst -Force }
+# 3b) restore script (dostane se i do zalohy - .local\bin je zdroj, takze
+#     obnova na novem stroji ma restore k dispozici primo v zaloze)
+Step "nasazeni restore -> $restoreDst" { Copy-Item -LiteralPath $restoreSrc -Destination $restoreDst -Force }
 # 4) cmd wrapper (vola portable node absolutni cestou; %* propaguje argumenty)
 $cmdContent = "@echo off`r`n`"$nodeExe`" `"$editorDst`" %*`r`n"
 Step "zapis wrapperu -> $cmdDst" { Set-Content -LiteralPath $cmdDst -Value $cmdContent -Encoding ascii -NoNewline }

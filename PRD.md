@@ -224,6 +224,26 @@ node) do `~/.local/bin`, nasadí schéma vedle configu, srovná interval úlohy 
 `-Rollback` (obnova legacy). Přepnutí úlohy = nahrazení `claude-backup.ps1`
 (VBS wrapper i úloha zůstávají).
 
+### 5.7 Obnova (`claude-restore.ps1`, doplněno 2026-07-10)
+
+Opačný směr než engine, config-driven: přečte config, spočítá slugy zdrojů
+(stejný algoritmus jako `Get-SourceSlug`) a kopíruje `<kořen zálohy>\<slug>`
+zpět na cestu zdroje — žádná inverze slugu, mapování se vždy odvozuje z configu.
+
+- **PowerShell, ne Node** — obnovu potřebuješ na holém stroji, kde portable
+  node není; PowerShell + robocopy tam jsou vždy.
+- **Bezpečnostní sémantika** (restore přepisuje živá data): default
+  `robocopy /E` **bez mazání**; `-Mirror` zrcadlí jen **uvnitř obnovovaných
+  stromů** (u glob zdrojů po položkách — base, typicky celý profil, se nikdy
+  nezrcadlí); `-DryRun`; interaktivní potvrzení (přeskočí `-Yes`);
+  `.credentials.json` se nikdy neobnovuje (`/XF`, obrana do hloubky).
+- **Soběstačná záloha**: `-FromBackup <kořen>` najde config přímo v záloze
+  (obsahuje `.config\claude-backup` i `.local\bin` včetně restore scriptu) —
+  disaster recovery na novém stroji bez lokálního configu.
+- Výběr: `-From <cíl>` (default primární), `-Only <slug|pořadí>`.
+- Návratové kódy: 0 ok / 1 chyba kopírování či nenalezený `-Only` /
+  2 kořen zálohy nedostupný / 3 config / 4 neodsouhlaseno.
+
 ## 6. Fáze
 
 | Fáze | Obsah | Výstup | Stav |

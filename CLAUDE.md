@@ -16,7 +16,8 @@ Hotovo a nasazeno. Naplánovaná úloha běží na config-driven enginu. Klíčo
 - **`PRD.md`** — kompletní zadání a návrh (se stavem fází). **Jediný zdroj pravdy**
   pro záměr; než začneš měnit chování, přečti relevantní část.
 - **`claude-backup.ps1`** (engine, `robocopy /MIR`), **`claude-backup-cfg.js`**
-  (Node.js editor), **`config.schema.json`** (validace), **`deploy.ps1`** (nasazení).
+  (Node.js editor), **`claude-restore.ps1`** (obnova zálohy zpět, config-driven),
+  **`config.schema.json`** (validace), **`deploy.ps1`** (nasazení).
 - `README.md`, `.gitignore`.
 
 Původní zadrátovaná verze je v git historii. Není build ani lint; automatizované

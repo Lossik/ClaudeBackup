@@ -56,6 +56,7 @@ Ukáže přehled (zdroje, cíle, výjimky, notifikace, interval) a menu příkaz
 | `p` / `o` / `ec` | přidat / odebrat / **upravit** zdroj (`glob` nebo `dir`; lze omezit na konkrétní cíle) |
 | `c` / `x` / `ep` | přidat / odebrat / **upravit** cíl (pevná cesta, nebo disk podle jmenovky svazku) |
 | `f` / `d` | **výjimky** souborů / složek (`+jmeno` přidá, `-jmeno` odebere, prázdné = zpět) |
+| `k` | **úklid cílů** — vypíše a po potvrzení smaže z kořene cíle vše, co nepatří žádnému zdroji (starý layout, složky po odebraných zdrojích) |
 | `n` | **notifikace** při chybě zap/vyp (Windows toast) |
 | `i` | **interval** úlohy — změní minuty a nabídne aplikovat rovnou na živou úlohu |
 | `t` | **test (dry-run)** — `robocopy /L`, ukáže co by se zálohovalo, **nic nezapíše** |
@@ -123,6 +124,18 @@ deploy.ps1 -Rollback  # obnoví předchozí engine ze zálohy .bak
 Přepnutí úlohy na nový engine = nahrazení `~/.local/bin/claude-backup.ps1` (VBS
 wrapper i úloha zůstávají). Interval se srovná dle `schedule.intervalMinutes`.
 
+### Migrace na slug layout (jednorázově)
+
+Starší verze enginu ukládaly zálohy přímo do kořene cíle (`.claude`, `.local\…`).
+Slug schéma mění cesty všech záloh, takže po nasazení:
+
+1. `deploy.ps1` — nasadí nový engine.
+2. Nech proběhnout zálohu (nebo spusť úlohu ručně) — vzniknou slug složky.
+3. `claude-backup-cfg` → `k` — smaže staré složky (vypíše je a zeptá se).
+
+Do kroku 3 existují v cíli stará i nová kopie zároveň — když je OneDrive kvóta
+(~5 GB) těsná, spusť `k` už před krokem 2 (za cenu chvíle bez hotové zálohy).
+
 ## Obnova (kde jsou data)
 
 Záloha je **zrcadlo posledního stavu** (`robocopy /MIR`), ne historie verzí.
@@ -131,8 +144,13 @@ Data najdeš přímo v cíli:
 - **OneDrive:** `%OneDrive%\Backups\claude\` (je tu i log `_backup.log`)
 - **externí SSD:** `<disk>:\Backups\claude\` (písmeno se mění — hledá se podle jmenovky svazku; výchozí placeholder `BACKUP_SSD`)
 
-Obnova = zkopírovat složky zpět (např. `…\Backups\claude\.claude` zpět do
-`%USERPROFILE%`). Struktura pod `Backups\claude` odpovídá cestám v profilu.
+Každý zdroj má v cíli **vlastní složku** pojmenovanou „slugem" z jeho cesty
+v configu: `%USERPROFILE%\.local\bin` → `USERPROFILE_.local_bin`, položky glob
+zdroje (`.claude*`) leží v `USERPROFILE\.claude…`. Díky tomu si dva zdroje
+nikdy nesahají do stejné složky cíle (`/MIR` jednoho nemůže mazat data druhého).
+
+Obnova = zkopírovat obsah slug složky zpět na cestu, ze které slug vznikl
+(např. `…\Backups\claude\USERPROFILE\.claude` zpět do `%USERPROFILE%\.claude`).
 
 ⚠️ `/MIR` je **zrcadlo, ne archiv** — když v profilu soubor smažeš, při dalším
 běhu zmizí i ze zálohy. Není to ochrana proti „smazal jsem to omylem minulý týden".

@@ -2,7 +2,13 @@
 #
 # Zrcadli zdroje na cile (robocopy /MIR). ZADNE zadratovane nastaveni - vse se
 # cte z configu (%USERPROFILE%\.config\claude-backup\config.json), ktery odpovida
-# config.schema.json. Chovani je 1:1 s puvodni zadratovanou verzi (viz PRD, faze 1).
+# config.schema.json.
+#
+# Layout cile: kazdy zdroj se zalohuje do vlastni "slug" slozky v koreni cile
+# (slug se odvozuje z nerozvinuteho korene zdroje, viz Get-SourceSlug), takze
+# dva zdroje si nikdy nesahaji do stejneho podstromu - /MIR jednoho nemuze
+# smazat data druheho. Kolizi slugu (ruzne koreny -> stejny slug) odmita
+# validace jako chybu configu (exit 3).
 #
 # Spousteno naplanovanou ulohou ClaudeBackup (po prihlaseni + kazdych 10 min)
 # pres claude-backup-hidden.vbs (skryte okno), ktery propaguje navratovy kod.
@@ -134,6 +140,39 @@ foreach ($s in $sources) {
     }
 }
 
+function Get-SourceRoot($s) {
+    # Koren zdroje = NEROZVINUTY retezec z configu (dir: path, glob: base).
+    if ($s.type -eq 'glob') { return [string]$s.base } else { return [string]$s.path }
+}
+
+function Get-SourceSlug($s) {
+    # Slug = jmeno slozky zdroje v cili, odvozene z nerozvinuteho korene zdroje
+    # (stabilni, citelne, nezavisle na stroji): %USERPROFILE%\.local\bin
+    # -> USERPROFILE_.local_bin, C:\PHP\current -> C_PHP_current.
+    # Kazdy zdroj tak ma v cili vlastni strom a /MIR jednoho zdroje nikdy
+    # nemaze data jineho. MUSI byt 1:1 se sourceSlug() v claude-backup-cfg.js.
+    $t = (Get-SourceRoot $s).Trim().TrimEnd('\', '/')
+    $t = $t -replace '%', ''
+    $t = $t -replace '[\\/:]+', '_'
+    $t = $t -replace '[*?"<>|]', '_'
+    $t = $t.Trim('_').TrimEnd('.', ' ')
+    return $t
+}
+
+# Kolize slugu: ruzne koreny nesmi dat stejny slug (zapisovaly by do stejne
+# slozky cile a /MIR by data prubezne mazal). Stejny koren smi slug sdilet -
+# zapisy ze stejneho mista na disku jsou idempotentni.
+$slugRoots = @{}
+foreach ($s in $sources) {
+    $slug = Get-SourceSlug $s
+    if (-not $slug) { Stop-BadConfig "koren zdroje '$(Get-SourceRoot $s)' dava prazdny slug (nelze odvodit slozku v cili)" }
+    $key  = $slug.ToLowerInvariant()
+    $root = (Get-SourceRoot $s).Trim().TrimEnd('\', '/').ToLowerInvariant()
+    if ($slugRoots.ContainsKey($key)) {
+        if ($slugRoots[$key] -ne $root) { Stop-BadConfig "kolize slugu '$slug': koreny '$($slugRoots[$key])' a '$root' by zapisovaly do stejne slozky cile" }
+    } else { $slugRoots[$key] = $root }
+}
+
 # --- pomocne funkce --------------------------------------------------------
 function Resolve-EnvPath($path, $fallbacks) {
     # Expanduje %VAR%. Kdyz zbyde nerozvinuty %VAR% (promenna neni nastavena),
@@ -167,20 +206,9 @@ function Resolve-DestRoot($d) {
     return $null
 }
 
-function Get-DestSubPath($absPath) {
-    # Podslozka v cili. Kdyz je zdroj pod profilem, zachovej relativni cestu
-    # (.local\bin -> <cil>\.local\bin, shodne s legacy), jinak jen jmeno slozky.
+function Invoke-Mirror($sourcePath, $name, $destRoot, $destName, $opts) {
     # Pozn.: dlouha vysledna cesta (>260, MAX_PATH) neni problem - mirror dela
     # robocopy, ktery je long-path-aware (overeno na 266 i 512 znacich).
-    $prof = $env:USERPROFILE
-    if ($absPath.StartsWith($prof, [StringComparison]::OrdinalIgnoreCase)) {
-        $rel = $absPath.Substring($prof.Length).TrimStart('\', '/')
-        if ($rel) { return $rel }
-    }
-    return (Split-Path -Path $absPath -Leaf)
-}
-
-function Invoke-Mirror($sourcePath, $name, $destRoot, $destName, $opts) {
     $target = Join-Path $destRoot $name
     # /MIR zrcadli (vc. mazani), /XJ preskoci junctiony (sdileny obsah),
     # /XF vylouci citlive soubory, /XD vylouci slozky (jen kdyz nejake jsou),
@@ -285,6 +313,7 @@ foreach ($d in $ready) {
         if ($only.Count -and ($only -notcontains $d.Name)) { continue }
 
         if ($s.type -eq 'glob') {
+            $slug = Get-SourceSlug $s
             $base = [Environment]::ExpandEnvironmentVariables($s.base)
             if (-not (Test-Path -LiteralPath $base)) {
                 Log "glob $($s.pattern) v $base  preskoceno (base neexistuje)"
@@ -292,30 +321,33 @@ foreach ($d in $ready) {
             }
             Get-ChildItem -LiteralPath $base -Force -Filter $s.pattern | ForEach-Object {
                 $name = $_.Name
+                $rel  = Join-Path $slug $name
                 if ($_.PSIsContainer) {
-                    Invoke-Mirror $_.FullName $name $d.Path $d.Name $d.Opts
+                    Invoke-Mirror $_.FullName $rel $d.Path $d.Name $d.Opts
                 }
                 elseif ($excludeFiles -contains $name) {
                     # citlivy soubor primo v korenu: preskocit a smazat starou kopii v cili
-                    $old = Join-Path $d.Path $name
+                    $old = Join-Path $d.Path $rel
                     if ($DryRun) {
                         $note = if (Test-Path -LiteralPath $old) { '; stara kopie by se smazala' } else { '' }
-                        Log "file $name -> $($d.Name)  preskoceno (citlive)$note"
+                        Log "file $rel -> $($d.Name)  preskoceno (citlive)$note"
                     } else {
                         if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }
-                        Log "file $name -> $($d.Name)  preskoceno (citlive)"
+                        Log "file $rel -> $($d.Name)  preskoceno (citlive)"
                     }
                 }
                 else {
                     if ($DryRun) {
-                        Log "file $name -> $($d.Name)  (dry-run: zkopiroval by se)"
+                        Log "file $rel -> $($d.Name)  (dry-run: zkopiroval by se)"
                     } else {
                         try {
-                            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $d.Path $name) -Force -ErrorAction Stop
-                            Log "file $name -> $($d.Name)  ok"
+                            $slugDir = Join-Path $d.Path $slug
+                            if (-not (Test-Path -LiteralPath $slugDir)) { New-Item -ItemType Directory -Force -Path $slugDir -ErrorAction Stop | Out-Null }
+                            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $d.Path $rel) -Force -ErrorAction Stop
+                            Log "file $rel -> $($d.Name)  ok"
                         } catch {
                             $hadError = $true
-                            Log "file $name -> $($d.Name)  CHYBA: $($_.Exception.Message)"
+                            Log "file $rel -> $($d.Name)  CHYBA: $($_.Exception.Message)"
                         }
                     }
                 }
@@ -323,7 +355,7 @@ foreach ($d in $ready) {
         }
         elseif ($s.type -eq 'dir') {
             $p   = [Environment]::ExpandEnvironmentVariables($s.path)
-            $sub = Get-DestSubPath $p
+            $sub = Get-SourceSlug $s
             if (Test-Path -LiteralPath $p -PathType Container) {
                 Invoke-Mirror $p $sub $d.Path $d.Name $d.Opts
             } else {

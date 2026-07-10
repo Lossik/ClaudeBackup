@@ -4,7 +4,7 @@
 // claude-backup-cfg.js  (ClaudeBackup 2.0 - interaktivni editor configu, faze 2)
 //
 // Bezpecna uprava %USERPROFILE%\.config\claude-backup\config.json:
-//   - menu + pruvodci (pridat/odebrat zdroj i cil, upravit vyjimky),
+//   - menu + pruvodci (pridat/odebrat zdroj i cil, upravit vyjimky, uklid cilu),
 //   - validace pred ulozenim (zrcadli config.schema.json - stejna pravidla jako engine),
 //   - atomicky zapis (temp + rename) se zalohou config.json.bak.
 //
@@ -95,6 +95,21 @@ function resolveDestRoot(d) {
     return null;
 }
 
+// --- slug zdroje (zrcadli Get-SourceSlug v claude-backup.ps1) ---------------
+// Koren zdroje = NEROZVINUTY retezec z configu (dir: path, glob: base).
+function sourceRoot(s) { return String((s && (s.type === 'glob' ? s.base : s.path)) || ''); }
+
+// Slug = jmeno slozky zdroje v cili: %USERPROFILE%\.local\bin -> USERPROFILE_.local_bin.
+// Kazdy zdroj ma v cili vlastni strom; kolize (ruzne koreny -> stejny slug) blokuje validace.
+function sourceSlug(s) {
+    let t = sourceRoot(s).trim().replace(/[\\\/]+$/, '');
+    t = t.replace(/%/g, '');
+    t = t.replace(/[\\\/:]+/g, '_');
+    t = t.replace(/[*?"<>|]/g, '_');
+    t = t.replace(/^_+/, '').replace(/_+$/, '').replace(/[. ]+$/, '');
+    return t;
+}
+
 // --- validace (zrcadli config.schema.json + engine) ------------------------
 function validateConfig(cfg) {
     const e = [];
@@ -152,6 +167,22 @@ function validateConfig(cfg) {
         if (s && Array.isArray(s.onlyDestinations)) {
             s.onlyDestinations.forEach(od => { if (!names.includes(od)) e.push(`sources[${i}].onlyDestinations: neznamy cil '${od}'`); });
         }
+    });
+
+    // Kolize slugu: ruzne koreny nesmi dat stejny slug (zapisovaly by do stejne
+    // slozky cile a /MIR by data prubezne mazal). Stejny koren smi slug sdilet.
+    const slugRoots = {};   // slug (lowercase) -> { root, i }
+    srcs.forEach((s, i) => {
+        if (!s || typeof s !== 'object') return;
+        const root = sourceRoot(s);
+        if (!root) return;   // chybejici base/path uz je nahlaseno vyse
+        const slug = sourceSlug(s);
+        if (!slug) { e.push(`sources[${i}]: koren '${root}' dava prazdny slug (nelze odvodit slozku v cili)`); return; }
+        const key = slug.toLowerCase();
+        const norm = root.trim().replace(/[\\\/]+$/, '').toLowerCase();
+        const seen = slugRoots[key];
+        if (seen && seen.root !== norm) e.push(`sources[${i}]: kolize slugu '${slug}' se sources[${seen.i}] (ruzne koreny by zapisovaly do stejne slozky cile)`);
+        else if (!seen) slugRoots[key] = { root: norm, i };
     });
     return e;
 }
@@ -241,8 +272,8 @@ function setTaskIntervalMinutes(taskName, minutes) {
 }
 
 function srcLabel(s) {
-    if (s.type === 'glob') return `glob   base=${s.base}  pattern=${s.pattern}`;
-    if (s.type === 'dir') return `dir    ${s.path}`;
+    if (s.type === 'glob') return `glob   base=${s.base}  pattern=${s.pattern}  ->  ${sourceSlug(s)}\\`;
+    if (s.type === 'dir') return `dir    ${s.path}  ->  ${sourceSlug(s)}\\`;
     return `?      ${JSON.stringify(s)}`;
 }
 function destLabel(d) {
@@ -276,7 +307,7 @@ function render(cfg, dirty) {
     console.log('Interval ulohy: ' + (scheduleInterval(cfg) !== null ? scheduleInterval(cfg) + ' min' : '(nenastaveno)') + '   (uloha ' + scheduleTaskName(cfg) + ')');
     console.log('------------------------------------------------------------');
     console.log('[p] pridat zdroj   [o] odebrat zdroj   [ec] upravit zdroj');
-    console.log('[c] pridat cil     [x] odebrat cil     [ep] upravit cil');
+    console.log('[c] pridat cil     [x] odebrat cil     [ep] upravit cil   [k] uklid cilu');
     console.log('[f] vyjimky-soubory   [d] vyjimky-slozky   [n] notifikace zap/vyp');
     console.log('[i] interval ulohy   [t] test (dry-run)   [s] stav   [u] ulozit   [q] konec');
 }
@@ -533,6 +564,49 @@ async function showStatus(cfg) {
     } catch (e) { console.log('  ' + out); }
 }
 
+// --- uklid cilu (jednorazova migrace na slug layout) ------------------------
+// V koreni kazdeho cile smi byt jen slug slozky zdroju a log soubor. Vse
+// ostatni (typicky stary layout pred slug schematem) vypise a po potvrzeni
+// smaze. Jedina destruktivni akce editoru - vzdy interaktivni, s vypisem predem.
+async function cleanupDestinations(cfg) {
+    const errs = validateConfig(cfg);
+    if (errs.length) {
+        console.log('\nNELZE UKLIDIT - config neni platny:');
+        errs.forEach(x => console.log('  * ' + x));
+        return;
+    }
+    console.log('\n----- UKLID CILU: v koreni cile smi byt jen slug slozky zdroju a log -----');
+    for (const d of cfg.destinations) {
+        console.log('\n  cil ' + d.name + ':');
+        const root = resolveDestRoot(d);
+        if (!root) { console.log('    nedostupny - preskoceno.'); continue; }
+        if (!fs.existsSync(root)) { console.log('    slozka neexistuje (' + root + ') - preskoceno.'); continue; }
+        const expected = new Set();
+        (cfg.sources || []).forEach(s => {
+            const only = Array.isArray(s.onlyDestinations) ? s.onlyDestinations.filter(Boolean) : [];
+            if (only.length && !only.includes(d.name)) return;
+            const slug = sourceSlug(s);
+            if (slug) expected.add(slug.toLowerCase());
+        });
+        const logFile = (cfg.log && cfg.log.file) ? cfg.log.file : '_backup.log';
+        expected.add(logFile.toLowerCase());
+        let entries;
+        try { entries = fs.readdirSync(root); }
+        catch (err) { console.log('    nelze cist (' + err.message + ') - preskoceno.'); continue; }
+        const orphans = entries.filter(n => !expected.has(n.toLowerCase()));
+        if (!orphans.length) { console.log('    cil je cisty (' + root + ').'); continue; }
+        console.log('    polozky nepatrici zadnemu zdroji:');
+        orphans.forEach(n => console.log('      ' + path.join(root, n)));
+        const ok = await askYesNo('    SMAZAT vypsanych ' + orphans.length + ' polozek?', false);
+        if (!ok) { console.log('    ponechano beze zmeny.'); continue; }
+        for (const n of orphans) {
+            try { fs.rmSync(path.join(root, n), { recursive: true, force: true }); console.log('      - smazano: ' + n); }
+            catch (err) { console.log('      CHYBA mazani ' + n + ': ' + err.message); }
+        }
+    }
+    console.log('\n----- konec uklidu -----');
+}
+
 // --- hlavni smycka ---------------------------------------------------------
 async function main() {
     rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -571,6 +645,7 @@ async function main() {
             else if (cmd === 'ec') { if (await editSource(cfg)) dirty = true; }
             else if (cmd === 'f') { if (await editExcludes(cfg, 'files')) dirty = true; }
             else if (cmd === 'd') { if (await editExcludes(cfg, 'dirs')) dirty = true; }
+            else if (cmd === 'k') { await cleanupDestinations(cfg); }
             else if (cmd === 't') { await testDryRun(cfg); }
             else if (cmd === 's') { await showStatus(cfg); }
             else if (cmd === 'i') {

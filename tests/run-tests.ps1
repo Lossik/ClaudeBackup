@@ -24,7 +24,7 @@ function Check($name, $cond) {
 }
 function WriteJson($path, $obj) {
     # bez BOM (PS5.1 -Encoding utf8 pise BOM a JSON.parse v Node ho odmita)
-    [IO.File]::WriteAllText($path, ($obj | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false))
+    [IO.File]::WriteAllText($path, ($obj | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding $false))
 }
 function Slug($p) {
     # ocekavany slug (stejny algoritmus jako engine/editor)
@@ -300,6 +300,94 @@ if ($hasNode) {
     WriteJson $kbad $kcfg2
     $outG8 = "u`nq`n" | & $node $editor --config $kbad 2>&1 | Out-String
     Check 'G8. editor: keepDays<1 nejde ulozit' ($outG8 -match 'NELZE ULOZIT' -and $outG8 -match 'keepDays')
+}
+
+# ============================ H) databaze (dumpy) ============================
+# Stub dump nastroje (.cmd) misto realnych pg_dumpall/mariadb-dump - testuje se
+# orchestrace enginu (cerstvost, retence, optional, chyby), ne samotne dumpy.
+# Chovani stubu ridi flag soubory vedle nich (pg_down/pg_fail/maria_down).
+$H = "$S\db"
+New-Item -ItemType Directory -Force -Path "$H\bin", "$H\src", "$H\dst" | Out-Null
+Set-Content "$H\src\f.txt" 'x'
+Set-Content "$H\bin\pg_isready.cmd" "@echo off`r`nif exist `"%~dp0pg_down.flag`" exit /b 2`r`nexit /b 0"
+Set-Content "$H\bin\mariadb-admin.cmd" "@echo off`r`nif exist `"%~dp0maria_down.flag`" exit /b 1`r`nexit /b 0"
+Set-Content "$H\bin\pg_dumpall.cmd" "@echo off`r`nif exist `"%~dp0pg_fail.flag`" exit /b 1`r`n:loop`r`nif `"%~1`"==`"`" exit /b 1`r`nif `"%~1`"==`"-f`" (`r`necho -- PGDUMP> `"%~2`"`r`nexit /b 0`r`n)`r`nshift`r`ngoto loop"
+Set-Content "$H\bin\mariadb-dump.cmd" "@echo off`r`n:loop`r`nif `"%~1`"==`"`" exit /b 1`r`nif `"%~1`"==`"-r`" (`r`necho -- MARIADUMP> `"%~2`"`r`nexit /b 0`r`n)`r`nshift`r`ngoto loop"
+
+$hcfg = [ordered]@{
+    version = 1
+    sources = @([ordered]@{ type = 'dir'; path = "$H\src" })
+    excludeFiles = @('.credentials.json')
+    destinations = @([ordered]@{ name = 'TDB'; type = 'path'; path = "$H\dst"; primary = $true })
+    databases = [ordered]@{
+        stagingDir = "$H\staging"
+        servers = @(
+            [ordered]@{ type = 'postgres'; name = 'pg';    binDir = "$H\bin"; port = 5433; user = 'postgres'; intervalMinutes = 60; keepCount = 2 },
+            [ordered]@{ type = 'mariadb';  name = 'maria'; binDir = "$H\bin"; port = 3307; intervalMinutes = 60; keepCount = 2 }
+        )
+    }
+}
+$hcfgPath = "$H\config.json"
+WriteJson $hcfgPath $hcfg
+function AgeDumps { Get-ChildItem "$H\staging\*\*.sql" -ErrorAction SilentlyContinue | ForEach-Object { $_.LastWriteTime = (Get-Date).AddHours(-3) } }
+function DumpCount($n) { @(Get-ChildItem "$H\staging\db_$n" -Filter '*.sql' -ErrorAction SilentlyContinue).Count }
+
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $hcfgPath -NoNotify | Out-Null
+Check 'H1. prvni beh: exit 0' ($LASTEXITCODE -eq 0)
+Check 'H1. dump pg ve stagingu' ((DumpCount 'pg') -eq 1)
+Check 'H1. dump maria ve stagingu' ((DumpCount 'maria') -eq 1)
+Check 'H1. dumpy zrcadleny do cile' ((@(Get-ChildItem "$H\dst\db_pg" -Filter '*.sql' -ErrorAction SilentlyContinue).Count -eq 1) -and (@(Get-ChildItem "$H\dst\db_maria" -Filter '*.sql' -ErrorAction SilentlyContinue).Count -eq 1))
+Check 'H1. log hlasi dump ok' ((Get-Content "$H\dst\_backup.log" -Raw) -match 'db   db_pg  dump ok')
+
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $hcfgPath -NoNotify | Out-Null
+Check 'H2. cerstvy dump: nedumpuje se znovu (porad 1)' (($LASTEXITCODE -eq 0) -and ((DumpCount 'pg') -eq 1) -and ((DumpCount 'maria') -eq 1))
+
+# nedostupny volitelny server -> preskocit bez chyby; ne-volitelny -> exit 1
+AgeDumps
+Set-Content "$H\bin\pg_down.flag" 'x'
+$hcfg.databases.servers[0].optional = $true
+WriteJson $hcfgPath $hcfg
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $hcfgPath -NoNotify | Out-Null
+Check 'H3. volitelny nedostupny: exit 0, dump se nepridal' (($LASTEXITCODE -eq 0) -and ((DumpCount 'pg') -eq 1))
+Check 'H3. druhy (dostupny) server dumpnul a retence drzi keepCount=2' ((DumpCount 'maria') -eq 2)
+
+AgeDumps
+$hcfg.databases.servers[0].optional = $false
+WriteJson $hcfgPath $hcfg
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $hcfgPath -NoNotify | Out-Null
+Check 'H4. povinny nedostupny: exit 1 + hlaska v logu' (($LASTEXITCODE -eq 1) -and ((Get-Content "$H\dst\_backup.log" -Raw) -match 'db_pg  CHYBA: server nedostupny'))
+
+# selhany dump: exit 1, tmp uklizen, posledni dobry dump zustava (ve stagingu i cili)
+Remove-Item "$H\bin\pg_down.flag" -Force
+Set-Content "$H\bin\pg_fail.flag" 'x'
+AgeDumps
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $hcfgPath -NoNotify | Out-Null
+Check 'H5. selhany dump: exit 1' ($LASTEXITCODE -eq 1)
+Check 'H5. tmp uklizen, stary dump prezil' ((-not (Test-Path "$H\staging\db_pg\_dump.tmp")) -and ((DumpCount 'pg') -eq 1) -and (@(Get-ChildItem "$H\dst\db_pg" -Filter '*.sql').Count -eq 1))
+Remove-Item "$H\bin\pg_fail.flag" -Force
+
+# hesla do configu NEPATRI (zalohuje se do cloudu) - engine i editor odmitaji
+$hbad = "$H\config-pass.json"
+$hcfg2 = [ordered]@{
+    version = 1
+    sources = $hcfg.sources
+    excludeFiles = @('.credentials.json')
+    destinations = $hcfg.destinations
+    databases = [ordered]@{ servers = @([ordered]@{ type = 'mariadb'; name = 'm'; binDir = "$H\bin"; password = 'tajne' }) }
+}
+WriteJson $hbad $hcfg2
+$outH6 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $engine -ConfigPath $hbad -NoNotify 2>&1 | Out-String
+Check 'H6. password v configu: exit 3' (($LASTEXITCODE -eq 3) -and ($outH6 -match 'hesla do configu NEPATRI'))
+
+if ($hasNode) {
+    $outH7 = "q`n" | & $node $editor --config $hcfgPath 2>&1 | Out-String
+    Check 'H7. editor: render ukazuje db server' ($outH7 -match 'db_pg' -and $outH7 -match 'Databaze')
+    $outH8 = "u`nq`n" | & $node $editor --config $hbad 2>&1 | Out-String
+    Check 'H8. editor: password nejde ulozit' ($outH8 -match 'NELZE ULOZIT' -and $outH8 -match "password")
+    Set-Content "$H\dst\sirotek.txt" 'x'
+    New-Item -ItemType Directory -Force -Path "$H\dst\db_cizi" | Out-Null
+    $outH9 = "k`na`nq`n" | & $node $editor --config $hcfgPath 2>&1 | Out-String
+    Check 'H9. uklid: db slug slozky nejsou sirotci, cizi ano' ((Test-Path "$H\dst\db_pg") -and (Test-Path "$H\dst\db_maria") -and -not (Test-Path "$H\dst\db_cizi") -and -not (Test-Path "$H\dst\sirotek.txt"))
 }
 
 # ============================ vysledek =======================================

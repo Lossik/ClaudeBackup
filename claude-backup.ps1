@@ -15,6 +15,13 @@
 # keepDays dni (pak je purge smaze). Ochrana proti "smazal jsem to omylem" -
 # na OneDrive nechavej vypnuty (ma vlastni kos i verzovani, setri 5GB kvotu).
 #
+# Databaze (volitelny blok databases): pg_dumpall / mariadb-dump serveru do
+# lokalniho stagingu (%LOCALAPPDATA%\claude-backup\dbdumps\db_<name>), odtud
+# /MIR na cile jako slug 'db_<name>'. Dump az kdyz je nejnovejsi starsi nez
+# intervalMinutes; keepCount poslednich dumpu se drzi, starsi se mazou.
+# HESLA DO CONFIGU NEPATRI (config se zalohuje do cloudu) - Postgres pouziva
+# pgpass.conf/trust, MariaDB --defaults-extra-file pres extraArgs.
+#
 # Spousteno naplanovanou ulohou ClaudeBackup (po prihlaseni + kazdych 10 min)
 # pres claude-backup-hidden.vbs (skryte okno), ktery propaguje navratovy kod.
 #
@@ -208,6 +215,46 @@ foreach ($s in $sources) {
     } else { $slugRoots[$key] = $root }
 }
 
+# --- validace databazi (volitelny blok databases) ---------------------------
+# Dumpy DB serveru: pg_dumpall / mariadb-dump do stagingu, odtud /MIR na cile
+# jako slug 'db_<name>'. HESLA DO CONFIGU NEPATRI - config se zalohuje do
+# cloudu (stejny invariant jako .credentials.json); Postgres bere pgpass/trust,
+# MariaDB --defaults-extra-file pres extraArgs.
+$dbServers = @()
+$dbStagingRootRaw = '%LOCALAPPDATA%\claude-backup\dbdumps'
+if ($cfg.databases) {
+    if ($cfg.databases.stagingDir) { $dbStagingRootRaw = [string]$cfg.databases.stagingDir }
+    $dbServers = @($cfg.databases.servers | Where-Object { $null -ne $_ })
+    if ($dbServers.Count -lt 1) { Stop-BadConfig "databases: prazdne nebo chybejici 'servers'" }
+    $dbNames = @{}
+    foreach ($srv in $dbServers) {
+        if (@('postgres', 'mariadb') -notcontains $srv.type) { Stop-BadConfig "databases: neznamy typ serveru '$($srv.type)'" }
+        if (-not $srv.name -or ("$($srv.name)" -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$')) { Stop-BadConfig "databases: server bez platneho 'name' (povolene A-Za-z0-9_.-, urcuje slozku v cili)" }
+        $nkey = "$($srv.name)".ToLowerInvariant()
+        if ($dbNames.ContainsKey($nkey)) { Stop-BadConfig "databases: duplicitni jmeno serveru '$($srv.name)'" }
+        $dbNames[$nkey] = $true
+        if (-not $srv.binDir) { Stop-BadConfig "databases: server '$($srv.name)' nema binDir" }
+        if ($srv.PSObject.Properties['password']) { Stop-BadConfig "databases: server '$($srv.name)' ma 'password' - hesla do configu NEPATRI (config se zalohuje do cloudu; pouzij pgpass.conf / --defaults-extra-file)" }
+        foreach ($od in @($srv.onlyDestinations | Where-Object { $_ })) {
+            if ($destNames -notcontains $od) { Stop-BadConfig "databases: server '$($srv.name)' odkazuje na neexistujici cil v onlyDestinations: '$od'" }
+        }
+        if ($null -ne $srv.port) {
+            $p = 0
+            if (-not [int]::TryParse("$($srv.port)", [ref]$p) -or $p -lt 1 -or $p -gt 65535) { Stop-BadConfig "databases: server '$($srv.name)' ma neplatny port (cekam 1-65535)" }
+        }
+        foreach ($intProp in @('intervalMinutes', 'keepCount')) {
+            if ($null -ne $srv.$intProp) {
+                $v = 0
+                if (-not [int]::TryParse("$($srv.$intProp)", [ref]$v) -or $v -lt 1) { Stop-BadConfig "databases: server '$($srv.name)' ma neplatny $intProp (cekam cele cislo >= 1)" }
+            }
+        }
+        # db slug zije ve stejnem prostoru cile jako slugy zdroju - kolize je chyba
+        $skey = "db_$nkey"
+        if ($slugRoots.ContainsKey($skey)) { Stop-BadConfig "kolize slugu 'db_$($srv.name)': jmeno db serveru koliduje se slozkou jineho zdroje v cili" }
+        $slugRoots[$skey] = "db:$nkey"
+    }
+}
+
 # --- pomocne funkce --------------------------------------------------------
 function Resolve-EnvPath($path, $fallbacks) {
     # Expanduje %VAR%. Kdyz zbyde nerozvinuty %VAR% (promenna neni nastavena),
@@ -324,6 +371,113 @@ function Invoke-Mirror($sourcePath, $name, $destRoot, $destName, $opts, $trashDa
     }
 }
 
+function Resolve-DbTool($binDir, $baseName) {
+    # Najde dump/check nastroj v binDir. Krome .exe bere i .cmd/.bat - kvuli
+    # sandbox testum (stub nastroje) i pripadnym wrapperum.
+    foreach ($ext in @('.exe', '.cmd', '.bat')) {
+        $p = Join-Path $binDir "$baseName$ext"
+        if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+    }
+    return $null
+}
+
+function Invoke-DbTool($tool, $toolArgs, $errFile) {
+    # Spusti nastroj; stdout zahodi, stderr do souboru (prvni radka jde do
+    # logu pri chybe). EAP docasne Continue - v PS 5.1 by presmerovani stderr
+    # pri 'Stop' shodilo skript prvni stderr radkou (NativeCommandError).
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $tool @toolArgs 2>$errFile | Out-Null } finally { $ErrorActionPreference = $old }
+    return $LASTEXITCODE
+}
+
+function Invoke-DbDumps($stagingRoot) {
+    # Dumpy vsech nakonfigurovanych DB serveru do stagingu (jednou za beh,
+    # nezavisle na cilech - zrcadleni na cile dela bezny Invoke-Mirror pote).
+    # Novy dump az kdyz je nejnovejsi starsi nez intervalMinutes (zaloha bezi
+    # co ~10 min, dump pokazde by byl zbytecne drahy). Dump jde do _dump.tmp
+    # a az pri uspechu se prejmenuje na datovany .sql - selhany dump nikdy
+    # neprepise posledni dobry. Retence: keepCount poslednich dumpu.
+    foreach ($srv in $script:dbServers) {
+        $slug   = "db_$($srv.name)"
+        $stage  = Join-Path $stagingRoot $slug
+        $ivMin  = if ($srv.intervalMinutes) { [int]$srv.intervalMinutes } else { 360 }
+        $keep   = if ($srv.keepCount) { [int]$srv.keepCount } else { 7 }
+        $dbHost = if ($srv.host) { [string]$srv.host } else { 'localhost' }
+        $dbPort = if ($srv.port) { [int]$srv.port } elseif ($srv.type -eq 'postgres') { 5432 } else { 3306 }
+        $dbUser = if ($srv.user) { [string]$srv.user } elseif ($srv.type -eq 'postgres') { 'postgres' } else { 'root' }
+        $binDir = Resolve-EnvPath ([string]$srv.binDir) $null
+
+        # cerstvost podle nejnovejsiho dumpu ve stagingu
+        $latest = $null
+        if (Test-Path -LiteralPath $stage) {
+            $latest = Get-ChildItem -LiteralPath $stage -Filter '*.sql' -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        }
+        if ($latest -and (([DateTime]::Now - $latest.LastWriteTime).TotalMinutes -lt $ivMin)) {
+            Log "db   $slug  dump cerstvy ($([int]([DateTime]::Now - $latest.LastWriteTime).TotalMinutes)/$ivMin min) - nedumpuje se"
+            continue
+        }
+        if ($DryRun) { Log "db   $slug  (dry-run: dump by se provedl)"; continue }
+
+        if ($srv.type -eq 'postgres') {
+            $checkTool = Resolve-DbTool $binDir 'pg_isready'
+            $dumpTool  = Resolve-DbTool $binDir 'pg_dumpall'
+        } else {
+            $checkTool = Resolve-DbTool $binDir 'mariadb-admin'; if (-not $checkTool) { $checkTool = Resolve-DbTool $binDir 'mysqladmin' }
+            $dumpTool  = Resolve-DbTool $binDir 'mariadb-dump';  if (-not $dumpTool)  { $dumpTool  = Resolve-DbTool $binDir 'mysqldump' }
+        }
+        if (-not $dumpTool -or -not $checkTool) {
+            $script:hadError = $true
+            Log "db   $slug  CHYBA: dump nastroje nenalezeny v '$binDir'"
+            continue
+        }
+
+        # dostupnost serveru - odlisit "server nebezi" (volitelny smi) od chyby dumpu
+        $errFile = Join-Path $env:TEMP "claude-backup-db-$PID.err"
+        if ($srv.type -eq 'postgres') { $checkArgs = @('-h', $dbHost, '-p', "$dbPort", '-t', '5') }
+        else { $checkArgs = @('-h', $dbHost, '-P', "$dbPort", '-u', $dbUser, '--connect-timeout=5', 'ping') }
+        $rc = Invoke-DbTool $checkTool $checkArgs $errFile
+        if ($rc -ne 0) {
+            if ($srv.optional) { Log "db   $slug  preskoceno (server nedostupny, volitelny)" }
+            else { $script:hadError = $true; Log "db   $slug  CHYBA: server nedostupny (${dbHost}:$dbPort)" }
+            try { Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue } catch { }
+            continue
+        }
+
+        if (-not (Test-Path -LiteralPath $stage)) { New-Item -ItemType Directory -Force -Path $stage | Out-Null }
+        $tmp   = Join-Path $stage '_dump.tmp'
+        $final = Join-Path $stage ("$($srv.name)_" + [DateTime]::Now.ToString('yyyy-MM-dd_HHmmss') + '.sql')
+        if ($srv.type -eq 'postgres') {
+            # -w: nikdy se neptat na heslo (skryty beh by visel); trust/pgpass.conf
+            $dumpArgs = @('-h', $dbHost, '-p', "$dbPort", '-U', $dbUser, '-w', '-f', $tmp)
+        } else {
+            $dumpArgs = @('-h', $dbHost, '-P', "$dbPort", '-u', $dbUser, '--all-databases', '--routines', '--events', '--single-transaction', '-r', $tmp)
+        }
+        $dumpArgs = @($dumpArgs) + @($srv.extraArgs | Where-Object { $_ })
+        $rc = Invoke-DbTool $dumpTool $dumpArgs $errFile
+        if (($rc -eq 0) -and (Test-Path -LiteralPath $tmp) -and ((Get-Item -LiteralPath $tmp).Length -gt 0)) {
+            Move-Item -LiteralPath $tmp -Destination $final -Force
+            $sizeKB = [int]((Get-Item -LiteralPath $final).Length / 1KB)
+            Log "db   $slug  dump ok: $(Split-Path -Leaf $final) ($sizeKB KB)"
+            # retence: drzet keepCount nejnovejsich (mirror mazani propaguje na cile)
+            foreach ($oldDump in @(Get-ChildItem -LiteralPath $stage -Filter '*.sql' | Sort-Object LastWriteTime -Descending | Select-Object -Skip $keep)) {
+                try {
+                    Remove-Item -LiteralPath $oldDump.FullName -Force -ErrorAction Stop
+                    Log "db   $slug  smazan stary dump: $($oldDump.Name)"
+                } catch { Log "db   $slug  varovani: nejde smazat stary dump $($oldDump.Name) ($($_.Exception.Message))" }
+            }
+        } else {
+            $script:hadError = $true
+            $firstErr = ''
+            try { if (Test-Path -LiteralPath $errFile) { $firstErr = @(Get-Content -LiteralPath $errFile | Where-Object { $_ -and $_.Trim() })[0] } } catch { }
+            Log "db   $slug  CHYBA dumpu (exit $rc) $firstErr"
+            try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+        }
+        try { Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
 # --- priprava cilu; nedostupne vyradit ------------------------------------
 $ready           = @()
 $skipNotes       = @()
@@ -388,6 +542,10 @@ foreach ($n in $skipNotes) { Log $n }
 
 $hadError = $false
 
+# --- dumpy databazi (jednou za beh, do stagingu; zrcadleni resi smycka nize) --
+$dbStagingRoot = Resolve-EnvPath $dbStagingRootRaw $null
+if ($dbServers.Count) { Invoke-DbDumps $dbStagingRoot }
+
 foreach ($d in $ready) {
     foreach ($s in $sources) {
         # zdroj se zalohuje jen na cile v onlyDestinations (nezadano = na vsechny)
@@ -443,6 +601,20 @@ foreach ($d in $ready) {
             } else {
                 Log "dir  $sub -> $($d.Name)  preskoceno (neexistuje)"
             }
+        }
+    }
+
+    # dumpy databazi: zrcadleni stagingu na cil (stejne slug pravidlo jako zdroje)
+    foreach ($srv in $dbServers) {
+        $only = @($srv.onlyDestinations | Where-Object { $_ })
+        if ($only.Count -and ($only -notcontains $d.Name)) { continue }
+        $slug  = "db_$($srv.name)"
+        $stage = Join-Path $dbStagingRoot $slug
+        # zrcadlit jen neprazdny staging - /MIR prazdneho by smazal dumpy v cili
+        if ((Test-Path -LiteralPath $stage) -and @(Get-ChildItem -LiteralPath $stage -Filter '*.sql' -ErrorAction SilentlyContinue).Count) {
+            Invoke-Mirror $stage $slug $d.Path $d.Name $d.Opts $d.TrashDays
+        } else {
+            Log "db   $slug -> $($d.Name)  preskoceno (zadny dump ve stagingu)"
         }
     }
 }

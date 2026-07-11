@@ -191,6 +191,47 @@ function validateConfig(cfg) {
         if (seen && seen.root !== norm) e.push(`sources[${i}]: kolize slugu '${slug}' se sources[${seen.i}] (ruzne koreny by zapisovaly do stejne slozky cile)`);
         else if (!seen) slugRoots[key] = { root: norm, i };
     });
+
+    // databases (volitelny blok): dumpy DB serveru, slug 'db_<name>' zije ve
+    // stejnem prostoru cile jako slugy zdroju. HESLA DO CONFIGU NEPATRI
+    // (config se zalohuje do cloudu) - vlastnost password validace odmita.
+    if (cfg.databases !== undefined) {
+        const db = cfg.databases;
+        if (!db || typeof db !== 'object' || Array.isArray(db)) e.push('databases: musi byt objekt');
+        else {
+            if (db.stagingDir !== undefined && (typeof db.stagingDir !== 'string' || !db.stagingDir)) e.push('databases.stagingDir: musi byt neprazdny retezec');
+            const servers = Array.isArray(db.servers) ? db.servers : [];
+            if (servers.length < 1) e.push('databases.servers: musi mit aspon 1 polozku (jinak blok smaz)');
+            const seenNames = {};
+            servers.forEach((s, i) => {
+                if (!s || typeof s !== 'object') { e.push(`databases.servers[${i}]: neni objekt`); return; }
+                if (!['postgres', 'mariadb'].includes(s.type)) e.push(`databases.servers[${i}]: neznamy type '${s.type}' (cekam postgres/mariadb)`);
+                if (typeof s.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(s.name)) e.push(`databases.servers[${i}]: chybi platne name (povolene A-Za-z0-9_.-, urcuje slozku v cili)`);
+                else {
+                    const nk = s.name.toLowerCase();
+                    if (seenNames[nk] !== undefined) e.push(`databases.servers[${i}]: duplicitni name '${s.name}'`);
+                    seenNames[nk] = i;
+                    const sk = ('db_' + nk);
+                    const seen = slugRoots[sk];
+                    if (seen && seen.root !== 'db:' + nk) e.push(`databases.servers[${i}]: slug 'db_${s.name}' koliduje se slozkou zdroje v cili`);
+                    else if (!seen) slugRoots[sk] = { root: 'db:' + nk, i };
+                }
+                if (typeof s.binDir !== 'string' || !s.binDir) e.push(`databases.servers[${i}]: chybi binDir (slozka s dump nastroji)`);
+                if ('password' in s) e.push(`databases.servers[${i}]: 'password' do configu NEPATRI (config se zalohuje do cloudu; pouzij pgpass.conf / --defaults-extra-file)`);
+                if (s.host !== undefined && (typeof s.host !== 'string' || !s.host)) e.push(`databases.servers[${i}]: host musi byt neprazdny retezec`);
+                if (s.user !== undefined && (typeof s.user !== 'string' || !s.user)) e.push(`databases.servers[${i}]: user musi byt neprazdny retezec`);
+                if (s.port !== undefined && (!Number.isInteger(s.port) || s.port < 1 || s.port > 65535)) e.push(`databases.servers[${i}]: port musi byt cele cislo 1-65535`);
+                ['intervalMinutes', 'keepCount'].forEach(k => {
+                    if (s[k] !== undefined && (!Number.isInteger(s[k]) || s[k] < 1)) e.push(`databases.servers[${i}]: ${k} musi byt cele cislo >= 1`);
+                });
+                if (s.extraArgs !== undefined && !Array.isArray(s.extraArgs)) e.push(`databases.servers[${i}]: extraArgs musi byt pole`);
+                if (s.onlyDestinations !== undefined) {
+                    if (!Array.isArray(s.onlyDestinations)) e.push(`databases.servers[${i}]: onlyDestinations musi byt pole`);
+                    else s.onlyDestinations.forEach(od => { if (!names.includes(od)) e.push(`databases.servers[${i}].onlyDestinations: neznamy cil '${od}'`); });
+                }
+            });
+        }
+    }
     return e;
 }
 
@@ -296,6 +337,19 @@ function destLabel(d) {
     return `${d.name}  ${loc}${tags.length ? '  [' + tags.join(', ') + ']' : ''}`;
 }
 
+function dbServers(cfg) { return (cfg.databases && Array.isArray(cfg.databases.servers)) ? cfg.databases.servers : []; }
+function dbLabel(s) {
+    const host = s.host || 'localhost';
+    const port = s.port || (s.type === 'postgres' ? 5432 : 3306);
+    const user = s.user || (s.type === 'postgres' ? 'postgres' : 'root');
+    const tags = [];
+    tags.push('co ' + (s.intervalMinutes || 360) + ' min');
+    tags.push('drzet ' + (s.keepCount || 7));
+    if (s.optional) tags.push('volitelny');
+    const only = Array.isArray(s.onlyDestinations) && s.onlyDestinations.length ? '   -> jen: ' + s.onlyDestinations.join(', ') : '';
+    return `${s.type}  ${s.name}  ${host}:${port}  user=${user}  ->  db_${s.name}\\  [${tags.join(', ')}]${only}`;
+}
+
 function render(cfg, dirty) {
     console.log('\n============================================================');
     console.log('  ClaudeBackup - konfigurace' + (dirty ? '   * NEULOZENE ZMENY' : ''));
@@ -308,6 +362,10 @@ function render(cfg, dirty) {
     });
     console.log('Cile:');
     (cfg.destinations || []).forEach((d, i) => console.log(`  ${letter(i)}. ${destLabel(d)}`));
+    if (dbServers(cfg).length) {
+        console.log('Databaze (dumpy):');
+        dbServers(cfg).forEach((s, i) => console.log(`  ${i + 1}. ${dbLabel(s)}`));
+    }
     console.log('Vyjimky:');
     console.log('  soubory: ' + (cfg.excludeFiles || []).join(', '));
     console.log('  slozky:  ' + ((cfg.excludeDirs && cfg.excludeDirs.length) ? cfg.excludeDirs.join(', ') : '(zadne)'));
@@ -316,7 +374,7 @@ function render(cfg, dirty) {
     console.log('------------------------------------------------------------');
     console.log('[p] pridat zdroj   [o] odebrat zdroj   [ec] upravit zdroj');
     console.log('[c] pridat cil     [x] odebrat cil     [ep] upravit cil   [k] uklid cilu');
-    console.log('[f] vyjimky-soubory   [d] vyjimky-slozky   [n] notifikace zap/vyp');
+    console.log('[f] vyjimky-soubory   [d] vyjimky-slozky   [n] notifikace zap/vyp   [b] databaze');
     console.log('[i] interval ulohy   [t] test (dry-run)   [s] stav   [u] ulozit   [q] konec');
 }
 
@@ -533,6 +591,122 @@ async function editSource(cfg) {
     }
 }
 
+// --- databaze (dumpy DB serveru) --------------------------------------------
+// Sprava bloku databases: pridat/odebrat/upravit server. Hesla se NIKDY
+// neukladaji do configu (zalohuje se do cloudu) - pruvodce je ani nenabizi.
+async function editDatabases(cfg) {
+    let changed = false;
+    for (;;) {
+        const servers = dbServers(cfg);
+        console.log('\n  Databaze (dumpy pg_dumpall / mariadb-dump do stagingu, odtud na cile):');
+        if (!servers.length) console.log('    (zadne)');
+        servers.forEach((s, i) => console.log(`    ${i + 1}. ${dbLabel(s)}`));
+        console.log('  [p] pridat   [o] odebrat   [e] upravit   [z] zpet');
+        const c = (await ask('  co udelat? ')).trim().toLowerCase();
+        if (!c || c === 'z') return changed;
+        if (c === 'p') {
+            const t = (await ask('    typ [postgres/mariadb] (prazdne=zpet): ')).trim().toLowerCase();
+            if (!t) continue;
+            if (t !== 'postgres' && t !== 'mariadb') { console.log('    neznamy typ.'); continue; }
+            const name = (await askNonEmpty('    name (jmeno serveru, slozka v cili bude db_<name>): ')).trim();
+            if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) { console.log('    neplatne jmeno (povolene A-Za-z0-9_.-).'); continue; }
+            if (servers.some(s => s && String(s.name).toLowerCase() === name.toLowerCase())) { console.log('    server s timto jmenem uz existuje.'); continue; }
+            const srv = { type: t, name };
+            const binDir = await askNonEmpty('    binDir (slozka s ' + (t === 'postgres' ? 'pg_dumpall/pg_isready' : 'mariadb-dump/mariadb-admin') + ', lze %VAR%): ');
+            if (!fs.existsSync(expandEnv(binDir))) console.log('    pozn.: slozka ted neexistuje (' + expandEnv(binDir) + ') - pridavam presto.');
+            srv.binDir = binDir;
+            const host = (await ask('    host (prazdne = localhost): ')).trim();
+            if (host) srv.host = host;
+            const defPort = t === 'postgres' ? 5432 : 3306;
+            const port = (await ask('    port (prazdne = ' + defPort + '): ')).trim();
+            if (port) {
+                const p = parseInt(port, 10);
+                if (!Number.isInteger(p) || p < 1 || p > 65535 || String(p) !== port) { console.log('    neplatny port.'); continue; }
+                srv.port = p;
+            }
+            const defUser = t === 'postgres' ? 'postgres' : 'root';
+            const user = (await ask('    user (prazdne = ' + defUser + '; heslo do configu NEPATRI - pgpass/extraArgs): ')).trim();
+            if (user) srv.user = user;
+            const iv = (await ask('    dumpovat kdyz je posledni starsi nez minut (prazdne = 360): ')).trim();
+            if (iv) {
+                const m = parseInt(iv, 10);
+                if (!Number.isInteger(m) || m < 1 || String(m) !== iv) { console.log('    neplatne cislo.'); continue; }
+                srv.intervalMinutes = m;
+            }
+            const kc = (await ask('    kolik poslednich dumpu drzet (prazdne = 7): ')).trim();
+            if (kc) {
+                const m = parseInt(kc, 10);
+                if (!Number.isInteger(m) || m < 1 || String(m) !== kc) { console.log('    neplatne cislo.'); continue; }
+                srv.keepCount = m;
+            }
+            srv.optional = await askYesNo('    volitelny (nebezici server se preskoci bez chyby)?', false);
+            if (!srv.optional) delete srv.optional;
+            const only = csvToArr(await ask('    omezit na cile - jmena carkou (prazdne = vsechny) [' + (cfg.destinations || []).map(x => x.name).join(', ') + ']: '));
+            if (only.length) srv.onlyDestinations = only;
+            if (!cfg.databases || typeof cfg.databases !== 'object') cfg.databases = { servers: [] };
+            if (!Array.isArray(cfg.databases.servers)) cfg.databases.servers = [];
+            cfg.databases.servers.push(srv);
+            changed = true;
+            console.log('    + server pridan.');
+        } else if (c === 'o') {
+            if (!servers.length) { console.log('    zadne servery.'); continue; }
+            const a = (await ask('    cislo serveru k odebrani (prazdne=zpet): ')).trim();
+            if (!a) continue;
+            const idx = parseInt(a, 10) - 1;
+            if (isNaN(idx) || idx < 0 || idx >= servers.length) { console.log('    neplatne cislo.'); continue; }
+            const [rm] = cfg.databases.servers.splice(idx, 1);
+            if (!cfg.databases.servers.length) delete cfg.databases;   // prazdny blok nejde ulozit
+            changed = true;
+            console.log('    - odebran: ' + rm.name + '  (dumpy ve stagingu a cilech zustavaji - pripadne je smaz rucne / uklidem [k])');
+        } else if (c === 'e') {
+            if (!servers.length) { console.log('    zadne servery.'); continue; }
+            const a = (await ask('    cislo serveru k uprave (prazdne=zpet): ')).trim();
+            if (!a) continue;
+            const idx = parseInt(a, 10) - 1;
+            if (isNaN(idx) || idx < 0 || idx >= servers.length) { console.log('    neplatne cislo.'); continue; }
+            const s = servers[idx];
+            for (;;) {
+                console.log('\n    server ' + (idx + 1) + ': ' + dbLabel(s));
+                console.log('    [i] interval   [k] keepCount   [o] volitelny   [l] omezeni-cile   [c] binDir   [h] host:port   [u] user   [z] zpet');
+                const cc = (await ask('    co upravit? ')).trim().toLowerCase();
+                if (!cc || cc === 'z') break;
+                if (cc === 'i') {
+                    const v = (await ask('      dumpovat kdyz je posledni starsi nez minut (ted ' + (s.intervalMinutes || 360) + '): ')).trim();
+                    if (v) { const m = parseInt(v, 10); if (Number.isInteger(m) && m >= 1 && String(m) === v) { s.intervalMinutes = m; changed = true; } else console.log('      neplatne cislo.'); }
+                } else if (cc === 'k') {
+                    const v = (await ask('      kolik poslednich dumpu drzet (ted ' + (s.keepCount || 7) + '): ')).trim();
+                    if (v) { const m = parseInt(v, 10); if (Number.isInteger(m) && m >= 1 && String(m) === v) { s.keepCount = m; changed = true; } else console.log('      neplatne cislo.'); }
+                } else if (cc === 'o') {
+                    if (s.optional) delete s.optional; else s.optional = true;
+                    changed = true;
+                    console.log('      volitelny: ' + (s.optional ? 'ANO' : 'ne'));
+                } else if (cc === 'l') {
+                    const names = (cfg.destinations || []).map(x => x.name);
+                    const nv = (await ask('      cile carkou ("-" = na vsechny; prazdne=nechat) [' + names.join(', ') + ']: ')).trim();
+                    if (nv === '-') { delete s.onlyDestinations; changed = true; console.log('      -> na vsechny cile'); }
+                    else if (nv) {
+                        const arr = csvToArr(nv);
+                        const bad = arr.filter(x => !names.includes(x));
+                        if (bad.length) console.log('      neexistujici cile: ' + bad.join(', '));
+                        else { s.onlyDestinations = arr; changed = true; console.log('      -> jen: ' + arr.join(', ')); }
+                    }
+                } else if (cc === 'c') {
+                    const v = (await ask('      novy binDir (prazdne=nechat): ')).trim();
+                    if (v) { if (!fs.existsSync(expandEnv(v))) console.log('      pozn.: slozka ted neexistuje (' + expandEnv(v) + ').'); s.binDir = v; changed = true; }
+                } else if (cc === 'h') {
+                    const nh = (await ask('      host (prazdne=nechat "' + (s.host || 'localhost') + '"): ')).trim();
+                    if (nh) { s.host = nh; changed = true; }
+                    const np = (await ask('      port (prazdne=nechat ' + (s.port || (s.type === 'postgres' ? 5432 : 3306)) + '): ')).trim();
+                    if (np) { const p = parseInt(np, 10); if (Number.isInteger(p) && p >= 1 && p <= 65535 && String(p) === np) { s.port = p; changed = true; } else console.log('      neplatny port.'); }
+                } else if (cc === 'u') {
+                    const v = (await ask('      user (prazdne=nechat; heslo do configu NEPATRI): ')).trim();
+                    if (v) { s.user = v; changed = true; }
+                } else console.log('      neznamy prikaz.');
+            }
+        } else console.log('    neznamy prikaz.');
+    }
+}
+
 // --- test (dry-run) a stav (faze 3) ----------------------------------------
 async function testDryRun(cfg) {
     const errs = validateConfig(cfg);
@@ -613,6 +787,11 @@ async function cleanupDestinations(cfg) {
             const slug = sourceSlug(s);
             if (slug) expected.add(slug.toLowerCase());
         });
+        dbServers(cfg).forEach(s => {
+            const only = Array.isArray(s.onlyDestinations) ? s.onlyDestinations.filter(Boolean) : [];
+            if (only.length && !only.includes(d.name)) return;
+            if (s && s.name) expected.add(('db_' + s.name).toLowerCase());
+        });
         const logFile = (cfg.log && cfg.log.file) ? cfg.log.file : '_backup.log';
         expected.add(logFile.toLowerCase());
         expected.add('_kos');   // kos enginu (trash.keepDays) neni sirotek
@@ -669,6 +848,7 @@ async function main() {
             else if (cmd === 'x') { if (await removeDestination(cfg)) dirty = true; }
             else if (cmd === 'ep') { if (await editDestination(cfg)) dirty = true; }
             else if (cmd === 'ec') { if (await editSource(cfg)) dirty = true; }
+            else if (cmd === 'b') { if (await editDatabases(cfg)) dirty = true; }
             else if (cmd === 'f') { if (await editExcludes(cfg, 'files')) dirty = true; }
             else if (cmd === 'd') { if (await editExcludes(cfg, 'dirs')) dirty = true; }
             else if (cmd === 'k') { await cleanupDestinations(cfg); }

@@ -1,6 +1,6 @@
 # PRD: ClaudeBackup 2.0 — zálohování řízené configem
 
-**Stav:** ✅ hotovo — fáze 1–4 implementovány, ověřeny a **nasazeny** (naplánovaná úloha běží na novém config-driven enginu). Navíc: Windows notifikace při selhání (s rate-limitem), editace intervalu úlohy, slug layout cílů (§ 5.3), restore (§ 5.7), watchdog (§ 5.8), testy v repu (§ 5.9), koš na smazané (§ 5.10), `deploy -CreateTask`.
+**Stav:** ✅ hotovo — fáze 1–4 implementovány, ověřeny a **nasazeny** (naplánovaná úloha běží na novém config-driven enginu). Navíc: Windows notifikace při selhání (s rate-limitem), editace intervalu úlohy, slug layout cílů (§ 5.3), restore (§ 5.7), watchdog (§ 5.8), testy v repu (§ 5.9), koš na smazané (§ 5.10), `deploy -CreateTask`, dumpy databází (§ 5.11).
 **Datum:** 2026-07-07
 **Repo:** github.com/Lossik/ClaudeBackup
 
@@ -298,6 +298,55 @@ Zásady: koš jen na **smazané**, ne přepsané (viz § 4 ne-cíle);
 úvahu robocopy); `_kos` je na whitelistu úklidu `[k]`; OneDrive koš nemá
 (vlastní koš + verzování, 5GB kvóta), SSD cíle ano (doporučeno 30 dní).
 Editor: `[ep]` → `k` (nastavit/vypnout), průvodce `[c]` se ptá při přidání cíle.
+
+### 5.11 Databáze — dumpy PostgreSQL a MariaDB (doplněno 2026-07-11)
+
+Živé databázové soubory (datadir) nelze bezpečně zálohovat `/MIR` — kopie
+otevřených souborů je nekonzistentní. Volitelný blok `databases` proto zálohuje
+**logické dumpy**:
+
+```json
+"databases": {
+  "servers": [
+    { "type": "mariadb",  "name": "mariadb1011", "binDir": "%USERPROFILE%\\.local\\MariaDB\\...\\bin",
+      "port": 3307, "user": "root", "intervalMinutes": 360, "keepCount": 7,
+      "onlyDestinations": ["extSSD-db"] },
+    { "type": "postgres", "name": "postgres17", "binDir": "%USERPROFILE%\\.local\\PostgreSQL\\pgsql\\bin",
+      "port": 5433, "user": "postgres", "optional": true, "onlyDestinations": ["extSSD-db"] }
+  ]
+}
+```
+
+1. **Dump do stagingu** (`%LOCALAPPDATA%\claude-backup\dbdumps\db_<name>`,
+   přepsatelné přes `databases.stagingDir`): `pg_dumpall` (všechny DB včetně
+   rolí) resp. `mariadb-dump --all-databases --routines --events
+   --single-transaction`. Dump jde do `_dump.tmp` a až při úspěchu se
+   přejmenuje na datovaný `.sql` — **selhaný dump nikdy nepřepíše poslední
+   dobrý**. Nový dump až když je nejnovější starší než `intervalMinutes`
+   (výchozí 360) — záloha běží co ~10 min a dumpovat pokaždé by bylo drahé.
+2. **Retence ve stagingu**: drží se `keepCount` (výchozí 7) posledních dumpů,
+   starší se mažou — retence dumpů je tady, cíl koš nepotřebuje.
+3. **Zrcadlení**: staging se na cíle zrcadlí běžným `/MIR` jako slug
+   `db_<name>` (stejný prostor jmen jako slugy zdrojů — kolize hlídá
+   validace). `onlyDestinations` funguje jako u zdrojů — typicky vyhrazený
+   cíl na SSD bez koše. Staging je **záměrně mimo zálohované zdroje**, dumpy
+   se jinam nevezou.
+
+Zásady:
+
+- **Hesla do configu NEPATŘÍ** (config se zálohuje do cloudu — stejný
+  invariant jako `.credentials.json`). Vlastnost `password` odmítá schéma,
+  engine (exit 3) i editor. Autentizace: Postgres `pgpass.conf`/trust
+  (`pg_dumpall -w` se nikdy neptá — skrytý běh by visel), MariaDB
+  `--defaults-extra-file=...` v `extraArgs`.
+- Před dumpem se testuje dostupnost serveru (`pg_isready` /
+  `mariadb-admin ping`): nedostupný **volitelný** (`optional: true`) server
+  se přeskočí bez chyby (server spouštěný ručně), nedostupný povinný = exit 1
+  + toast. Chyba samotného dumpu je chyba vždy.
+- Editor: sekce „Databaze (dumpy)" v přehledu, správa přes `[b]`; úklid `[k]`
+  zná `db_<name>` složky jako legitimní.
+- Obnova dumpu je ruční (restore script dumpy neřeší): `psql -f <dump>.sql`
+  resp. `mariadb < <dump>.sql`.
 
 ## 6. Fáze
 

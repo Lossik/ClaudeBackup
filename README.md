@@ -60,6 +60,7 @@ Ukáže přehled (zdroje, cíle, výjimky, notifikace, interval) a menu příkaz
 | `p` / `o` / `ec` | přidat / odebrat / **upravit** zdroj (`glob` nebo `dir`; lze omezit na konkrétní cíle) |
 | `c` / `x` / `ep` | přidat / odebrat / **upravit** cíl (pevná cesta / jmenovka svazku; v `ep` i **koš** — dny držení smazaných) |
 | `f` / `d` | **výjimky** souborů / složek (`+jmeno` přidá, `-jmeno` odebere, prázdné = zpět) |
+| `b` | **databáze** — přidat / odebrat / upravit dumpované DB servery (viz níže) |
 | `k` | **úklid cílů** — vypíše a po potvrzení smaže z kořene cíle vše, co nepatří žádnému zdroji (starý layout, složky po odebraných zdrojích) |
 | `n` | **notifikace** při chybě zap/vyp (Windows toast) + interval opakování toastu při trvající chybě |
 | `i` | **interval** úlohy — změní minuty a nabídne aplikovat rovnou na živou úlohu |
@@ -227,6 +228,31 @@ nekopíruje, funguje i na exFAT.
 - Koš chrání jen **smazané** soubory, ne přepsané (verzování obsahu koš
   nedělá — na OneDrive ho řeší OneDrive sám).
 - `.credentials.json` se do koše nikdy nedostane (výjimky platí i pro koš).
+
+## Zálohování databází (dumpy)
+
+Živý datadir PostgreSQL/MariaDB nejde bezpečně kopírovat — blok `databases`
+v configu (spravuje editor přes `b`) proto zálohuje **logické dumpy**:
+
+1. Engine dumpne server do lokálního stagingu
+   (`%LOCALAPPDATA%\claude-backup\dbdumps\db_<name>`): `pg_dumpall` (všechny
+   DB včetně rolí) resp. `mariadb-dump --all-databases`. Nový dump vzniká, až
+   když je poslední starší než `intervalMinutes` (výchozí 360 = 6 h); drží se
+   `keepCount` posledních (výchozí 7), starší se mažou.
+2. Staging se na cíle zrcadlí jako složka `db_<name>` — typicky na vyhrazený
+   cíl (`onlyDestinations`), např. `Backups\databases` na SSD, **bez koše**
+   (retenci řeší `keepCount`).
+
+**Hesla do configu nepatří** (config se zálohuje do cloudu) — schéma, engine
+i editor vlastnost `password` odmítají. Postgres se autentizuje přes
+`pgpass.conf`/trust, MariaDB přes `--defaults-extra-file=...` v `extraArgs`.
+
+Server s `optional: true` (např. Postgres spouštěný jen ručně) se při
+nedostupnosti přeskočí bez chyby; nedostupný povinný server = exit 1 + toast.
+Selhaný dump nikdy nepřepíše poslední dobrý (dump jde přes `_dump.tmp`).
+
+**Obnova dumpu** (ručně): PostgreSQL `psql -p <port> -U postgres -f <dump>.sql
+postgres`, MariaDB `mariadb -P <port> -u root < <dump>.sql`.
 
 ## Návratové kódy enginu
 

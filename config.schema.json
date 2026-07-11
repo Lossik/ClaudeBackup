@@ -137,6 +137,42 @@
         ]
       }
     },
+    "databases": {
+      "type": "object",
+      "description": "Volitelne: dumpy databazovych serveru (pg_dumpall / mariadb-dump). Kazdy server se dumpuje do lokalniho stagingu (stagingDir\\db_<name>) a odtud zrcadli na cile jako zdroj se slugem 'db_<name>'. HESLA DO CONFIGU NEPATRI (config se zalohuje do cloudu) - Postgres pouziva pgpass.conf/trust, MariaDB --defaults-extra-file pres extraArgs; vlastnost 'password' schema zamerne nezna.",
+      "required": ["servers"],
+      "additionalProperties": false,
+      "properties": {
+        "stagingDir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Lokalni slozka pro dumpy pred zrcadlenim (env %...% se expanduji). Vychozi %LOCALAPPDATA%\\claude-backup\\dbdumps. NESMI byt uvnitr zalohovanych zdroju (dumpy by se vezly i na cile, kam nepatri)."
+        },
+        "servers": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Databazove servery k dumpovani.",
+          "items": {
+            "type": "object",
+            "required": ["type", "name", "binDir"],
+            "additionalProperties": false,
+            "properties": {
+              "type": { "enum": ["postgres", "mariadb"], "description": "postgres = pg_dumpall (vsechny DB vc. roli), mariadb = mariadb-dump --all-databases." },
+              "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$", "description": "Jmeno serveru; urcuje slug slozku 'db_<name>' v cili. Unikatni." },
+              "binDir": { "type": "string", "minLength": 1, "description": "Slozka s dump nastroji (pg_dumpall/pg_isready resp. mariadb-dump/mariadb-admin). Env %...% se expanduji." },
+              "host": { "type": "string", "minLength": 1, "description": "Vychozi localhost." },
+              "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Vychozi 5432 (postgres) / 3306 (mariadb)." },
+              "user": { "type": "string", "minLength": 1, "description": "Ucet pro dump. Vychozi postgres/root. BEZ hesla - viz popis bloku databases." },
+              "intervalMinutes": { "type": "integer", "minimum": 1, "description": "Novy dump az kdyz je nejnovejsi starsi nez tolik minut (vychozi 360). Zaloha bezi co ~10 min - dumpovat pokazde by bylo zbytecne drahe." },
+              "keepCount": { "type": "integer", "minimum": 1, "description": "Kolik poslednich dumpu drzet ve stagingu i cilech (vychozi 7). Starsi se mazou - retence dumpu je tady, ne v kosi cile." },
+              "optional": { "type": "boolean", "description": "Nedostupny server (nebezi) se preskoci bez chyby. Chyba samotneho dumpu je chyba vzdy." },
+              "extraArgs": { "type": "array", "items": { "type": "string" }, "description": "Extra argumenty dump nastroje (napr. --defaults-extra-file=... pro MariaDB heslo mimo config)." },
+              "onlyDestinations": { "type": "array", "items": { "type": "string" }, "description": "Jmena cilu, kam se dumpy zrcadli. Nezadano = na vsechny." }
+            }
+          }
+        }
+      }
+    },
     "log": {
       "type": "object",
       "description": "Log v primarnim cili.",
